@@ -1,13 +1,9 @@
 ---
-title: Excel 智能分析助手
-emoji: 📊
-colorFrom: blue
-colorTo: indigo
-sdk: gradio
-sdk_version: "5.23.0"
-app_file: app.py
-pinned: false
-python_version: "3.10"
+license: apache-2.0
+tags:
+- gradio
+- excel
+- data-analysis
 ---
 
 # 📊 Excel 智能分析助手
