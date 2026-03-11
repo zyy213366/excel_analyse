@@ -4,10 +4,10 @@ emoji: 📊
 colorFrom: blue
 colorTo: indigo
 sdk: gradio
-sdk_version: "5.0.0"
+sdk_version: "5.6.0"
 app_file: app.py
 pinned: false
-python_version: "3.11"
+python_version: "3.10"
 ---
 
 # 📊 Excel 智能分析助手
