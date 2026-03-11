@@ -36,7 +36,7 @@ def _get_parser():
 def on_file_upload(file_obj):
     """文件上传后，自动检测列名并更新下拉框"""
     if file_obj is None:
-        return gr.update(value=""), gr.update(choices=[], value=None), gr.update(choices=[], value=[])
+        return "", gr.Dropdown(choices=[], value=None), gr.CheckboxGroup(choices=[], value=[])
 
     try:
         df, all_cols = load_excel(file_obj)
@@ -45,8 +45,8 @@ def on_file_upload(file_obj):
         if not numeric_cols:
             return (
                 "⚠ 未检测到可分析的数值列，请检查文件格式。",
-                gr.update(choices=[], value=None),
-                gr.update(choices=[], value=[]),
+                gr.Dropdown(choices=[], value=None),
+                gr.CheckboxGroup(choices=[], value=[]),
             )
 
         cols_preview = "  ".join([f"`{c}`" for c in numeric_cols[:15]])
@@ -56,11 +56,11 @@ def on_file_upload(file_obj):
         status = f"✅ 文件加载成功！检测到 **{len(numeric_cols)}** 个可分析列：\n\n{cols_preview}"
         return (
             status,
-            gr.update(choices=numeric_cols, value=numeric_cols[0] if numeric_cols else None),
-            gr.update(choices=numeric_cols, value=[]),
+            gr.Dropdown(choices=numeric_cols, value=numeric_cols[0] if numeric_cols else None),
+            gr.CheckboxGroup(choices=numeric_cols, value=[]),
         )
     except Exception as e:
-        return f"❌ 文件读取失败：{str(e)}", gr.update(choices=[]), gr.update(choices=[])
+        return f"❌ 文件读取失败：{str(e)}", gr.Dropdown(choices=[]), gr.CheckboxGroup(choices=[])
 
 
 def _build_table_df(analysis) -> "pd.DataFrame | None":
@@ -382,14 +382,14 @@ def build_app():
         )
 
         analyze_btn.click(
-            fn=lambda: gr.update(value="*状态：分析中...*"),
+            fn=lambda: "*状态：分析中...*",
             outputs=[status_label],
         ).then(
             fn=on_analyze,
             inputs=[file_input, instruction_input, manual_mode, manual_y, manual_x, use_nlp_toggle],
             outputs=[result_md, report_file, result_table],
         ).then(
-            fn=lambda: gr.update(value="*状态：✅ 完成*"),
+            fn=lambda: "*状态：✅ 完成*",
             outputs=[status_label],
         )
 
