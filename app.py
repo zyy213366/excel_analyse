@@ -398,9 +398,10 @@ def build_app():
 
 if __name__ == "__main__":
     app = build_app()
-    # HF Spaces 会自动注入 SPACE_ID，检测到后让 HF 自己管理端口和地址
-    if os.getenv("SPACE_ID"):
-        app.launch()
+    # 本地开发：指定端口；云环境（HF/魔搭等）：绑定 0.0.0.0，端口由平台注入
+    is_cloud = os.getenv("SPACE_ID") or os.getenv("MODELSCOPE_ENVIRONMENT") or os.getenv("PORT")
+    if is_cloud:
+        app.launch(server_name="0.0.0.0")
     else:
         app.launch(
             server_name="0.0.0.0",
