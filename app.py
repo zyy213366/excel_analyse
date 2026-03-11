@@ -398,9 +398,13 @@ def build_app():
 
 if __name__ == "__main__":
     app = build_app()
-    app.launch(
-        server_name="0.0.0.0",
-        server_port=7860,
-        share=False,
-        show_error=True,
-    )
+    # HF Spaces 会自动注入 SPACE_ID，检测到后让 HF 自己管理端口和地址
+    if os.getenv("SPACE_ID"):
+        app.launch()
+    else:
+        app.launch(
+            server_name="0.0.0.0",
+            server_port=7860,
+            share=False,
+            show_error=True,
+        )
