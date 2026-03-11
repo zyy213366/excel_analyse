@@ -18,7 +18,8 @@ jobs:
       - name: Push to HuggingFace Spaces
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_USERNAME: ${{ secrets.HF_USERNAME }}
         run: |
           git config --global user.email "action@github.com"
           git config --global user.name "GitHub Action"
-          git push https://zyy213366:$HF_TOKEN@huggingface.co/spaces/zyy213366/excel-analyse master --force
+          git push https://$HF_USERNAME:$HF_TOKEN@huggingface.co/spaces/$HF_USERNAME/excel-analyse master --force
