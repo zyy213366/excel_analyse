@@ -22,5 +22,5 @@ RUN mkdir -p outputs uploads
 EXPOSE 7860
 
 # 启动（PORT 环境变量由平台注入，默认 7860）
-# build: 2026-03-12
+# build: 2026-03-12b
 CMD ["python", "app.py"]
