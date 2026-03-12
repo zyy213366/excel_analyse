@@ -28,4 +28,7 @@
 - y_vs_all 模式：x_columns 设为空数组 []，target_y 为用户指定的目标
 - two_column 模式：x_columns 包含一个列名，target_y 为另一个列名
 - multi_x_vs_y 模式：x_columns 包含多个列名，target_y 为目标列名
+  * 若用户未明确指定 X 列（如只说"多元回归"、"共线性检测"、"特征重要性"），
+    则将【所有可用列名（除 target_y 外）】全部填入 x_columns
+  * target_y 优先取用户明确提到的列；若完全没提，取可用列名中的最后一列
 - confidence < 0.6 表示解析把握不足，界面将提示用户手动确认

@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{% block title %}Excel 智能分析助手{% endblock %}</title>
+  <link rel="stylesheet" href="/static/css/main.css">
+  <!-- Alpine.js -->
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+  <!-- marked.js (Markdown 渲染) -->
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  {% block head %}{% endblock %}
+</head>
+<body>
+<div class="app-layout">
+
+  <!-- ── 侧边栏 ── -->
+  <aside class="sidebar">
+    <!-- Logo -->
+    <div class="sidebar-logo">
+      <div class="sidebar-logo-icon">📊</div>
+      <div>
+        <div class="sidebar-logo-text">Excel 分析助手</div>
+        <div class="sidebar-logo-sub">AI 驱动的数据洞察</div>
+      </div>
+    </div>
+
+    <!-- 主导航 -->
+    <div class="sidebar-section">
+      <a href="/" class="sidebar-item {% if active_page == 'home' %}active{% endif %}">
+        <span class="icon">🏠</span> 工作台
+      </a>
+      <a href="/analyze" class="sidebar-item {% if active_page == 'analyze' %}active{% endif %}">
+        <span class="icon">🔍</span> 智能分析
+        <span class="badge">NEW</span>
+      </a>
+      <a href="/history" class="sidebar-item {% if active_page == 'history' %}active{% endif %}">
+        <span class="icon">📋</span> 历史记录
+      </a>
+    </div>
+
+    <!-- 工具箱 -->
+    <div class="sidebar-section">
+      <div class="sidebar-section-label">工具箱</div>
+      <a href="/settings" class="sidebar-item {% if active_page == 'settings' %}active{% endif %}">
+        <span class="icon">⚙️</span> API 设置
+      </a>
+    </div>
+
+    <!-- 分析模式说明 -->
+    <div class="sidebar-section" style="margin-top: auto; padding-bottom: 16px;">
+      <div class="sidebar-section-label">分析模式</div>
+      <div class="sidebar-item" style="cursor: default; font-size: 12px; opacity: 0.8;">
+        <span class="icon">📈</span> 全因素分析
+      </div>
+      <div class="sidebar-item" style="cursor: default; font-size: 12px; opacity: 0.8;">
+        <span class="icon">🔗</span> 双列关系
+      </div>
+      <div class="sidebar-item" style="cursor: default; font-size: 12px; opacity: 0.8;">
+        <span class="icon">📐</span> 多因素回归
+      </div>
+    </div>
+  </aside>
+
+  <!-- ── 主内容区 ── -->
+  <div class="main-content">
+    <!-- 顶栏 -->
+    <header class="main-header">
+      <div>
+        <div class="main-header-title">{% block header_title %}工作台{% endblock %}</div>
+        <div class="main-header-sub">{% block header_sub %}Excel 智能分析助手{% endblock %}</div>
+      </div>
+    </header>
+
+    <!-- 页面内容 -->
+    {% block content %}{% endblock %}
+  </div>
+
+</div>
+<script src="/static/js/app.js"></script>
+{% block scripts %}{% endblock %}
+</body>
+</html>

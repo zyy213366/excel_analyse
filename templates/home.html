@@ -1,0 +1,82 @@
+{% extends "base.html" %}
+{% block title %}工作台 - Excel 智能分析助手{% endblock %}
+{% block header_title %}工作台{% endblock %}
+{% block header_sub %}在开始之前，可以拿例子练练手哦{% endblock %}
+
+{% block content %}
+<div class="main-body">
+
+  <!-- Banner -->
+  <div class="home-banner">
+    <div class="home-banner-mascot">🤖</div>
+    <div>
+      <div class="home-banner-title">在开始之前，可以拿例子练练手哦</div>
+      <div class="home-banner-sub">上传你的 Excel 文件，用自然语言描述分析需求，AI 帮你完成统计分析并生成专业报告</div>
+    </div>
+    <a href="/analyze" style="margin-left:auto; padding:10px 24px; background:var(--accent); color:white; border-radius:var(--radius-sm); font-weight:700; white-space:nowrap; flex-shrink:0;">
+      开始分析 →
+    </a>
+  </div>
+
+  <!-- 官方能力演示 -->
+  <div class="section-title">📋 官方能力演示</div>
+  <div class="cards-grid">
+
+    <!-- 卡片1：全因素分析 -->
+    <div class="feature-card">
+      <div class="feature-card-header">
+        <span class="feature-card-icon">📊</span> 全因素影响分析
+      </div>
+      <a href="/analyze?instruction=分析所有因素对目标变量的影响" class="feature-btn">分析所有影响因素</a>
+      <a href="/analyze?instruction=哪个因素对结果影响最大" class="feature-btn">找出最重要因素</a>
+      <a href="/analyze?instruction=对目标列做全量相关性分析" class="feature-btn">全量相关性分析</a>
+      <a href="/analyze?instruction=生成因子重要性报告" class="feature-btn">因子重要性报告</a>
+      <a href="/analyze?instruction=找出正相关和负相关因素" class="feature-btn">正负相关因素拆分</a>
+    </div>
+
+    <!-- 卡片2：双列关系 -->
+    <div class="feature-card">
+      <div class="feature-card-header">
+        <span class="feature-card-icon">🔗</span> 双列关系分析
+      </div>
+      <a href="/analyze?instruction=分析两列之间的相关性" class="feature-btn">双列相关性检验</a>
+      <a href="/analyze?instruction=计算Pearson和Spearman相关系数" class="feature-btn">Pearson + Spearman</a>
+      <a href="/analyze?instruction=分析A列和B列的线性关系" class="feature-btn">双向线性回归</a>
+      <a href="/analyze?instruction=绘制两列的分布对比图" class="feature-btn">分布对比图表</a>
+      <a href="/analyze?instruction=检验两列相关性的显著性" class="feature-btn">显著性检验</a>
+    </div>
+
+    <!-- 卡片3：多因素回归 -->
+    <div class="feature-card">
+      <div class="feature-card-header">
+        <span class="feature-card-icon">📐</span> 多因素回归分析
+      </div>
+      <a href="/analyze?instruction=多元线性回归分析" class="feature-btn">多元线性回归</a>
+      <a href="/analyze?instruction=分析多个自变量对因变量的影响" class="feature-btn">多X对单Y分析</a>
+      <a href="/analyze?instruction=检测自变量之间的多重共线性" class="feature-btn">多重共线性检测</a>
+      <a href="/analyze?instruction=随机森林特征重要性排序" class="feature-btn">RF 特征重要性</a>
+      <a href="/analyze?instruction=生成回归系数和P值报告" class="feature-btn">回归系数 + P 值</a>
+    </div>
+
+  </div>
+
+  <!-- 行业示例标签云 -->
+  <div class="section-title">🏭 行业专题样例演示</div>
+  <div class="tags-cloud">
+    {% set examples = [
+      "员工工资分析", "员工考勤分析", "员工信息整理",
+      "销售额趋势分析", "销售额与温度的关系",
+      "广告投放效果分析", "客服数据分析",
+      "学生成绩整理", "学生成绩查找", "成绩相关性分析",
+      "预算分析", "多表数据分析", "进销存数据分析",
+      "资产负债分析", "利润分析", "流量趋势分析",
+      "订单管理", "物流管理", "GDP数据整理分析",
+      "CPI多表对比分析",
+    ] %}
+    {% for example in examples %}
+    <a href="/analyze?instruction={{ example }}" class="tag-btn">{{ example }}</a>
+    {% endfor %}
+  </div>
+
+</div>
+{% endblock %}

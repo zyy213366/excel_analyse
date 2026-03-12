@@ -52,7 +52,12 @@ def _build_y_vs_all(writer, workbook, result: AnalysisResult,
     # ── 数据 Sheet（隐藏）──
     imp_sheet = "权重数据"
     plot_sheet = "图表数据源"
-    merged.to_excel(writer, sheet_name=imp_sheet, index=False)
+    # Imp_Pos / Imp_Neg 中的 0 替换为 NaN，避免图表贴出多余的 "0%" 标签
+    merged_chart = merged.copy()
+    for col in ("Imp_Pos", "Imp_Neg"):
+        if col in merged_chart.columns:
+            merged_chart[col] = merged_chart[col].replace(0, float("nan"))
+    merged_chart.to_excel(writer, sheet_name=imp_sheet, index=False)
     plot_df.to_excel(writer, sheet_name=plot_sheet, index=False)
     writer.sheets[imp_sheet].hide()
     writer.sheets[plot_sheet].hide()
@@ -74,14 +79,14 @@ def _build_y_vs_all(writer, workbook, result: AnalysisResult,
         "categories": [imp_sheet, 1, 0, count, 0],
         "values":     [imp_sheet, 1, 3, count, 3],
         "fill":       {"color": "#70AD47"},
-        "data_labels": {"value": True, "num_format": "0%"},
+        "data_labels": {"value": True, "num_format": "0%;;"},
     })
     chart_bar.add_series({
         "name": "负相关因素",
         "categories": [imp_sheet, 1, 0, count, 0],
         "values":     [imp_sheet, 1, 4, count, 4],
         "fill":       {"color": "#C00000"},
-        "data_labels": {"value": True, "num_format": "0%"},
+        "data_labels": {"value": True, "num_format": "0%;;"},
     })
     chart_bar.set_title({"name": "全局因子贡献度排名（颜色区分正负相关）"})
     chart_bar.set_x_axis({"name": "贡献权重", "major_gridlines": {"visible": True}})
@@ -237,7 +242,11 @@ def _build_multi_x_vs_y(writer, workbook, result: AnalysisResult,
     # ── 数据 Sheet（隐藏）──
     imp_sheet = "权重数据"
     plot_sheet = "图表数据源"
-    merged.to_excel(writer, sheet_name=imp_sheet, index=False)
+    merged_chart = merged.copy()
+    for col in ("Imp_Pos", "Imp_Neg"):
+        if col in merged_chart.columns:
+            merged_chart[col] = merged_chart[col].replace(0, float("nan"))
+    merged_chart.to_excel(writer, sheet_name=imp_sheet, index=False)
     plot_df.to_excel(writer, sheet_name=plot_sheet, index=False)
     writer.sheets[imp_sheet].hide()
     writer.sheets[plot_sheet].hide()
@@ -257,14 +266,14 @@ def _build_multi_x_vs_y(writer, workbook, result: AnalysisResult,
         "categories": [imp_sheet, 1, 0, count, 0],
         "values":     [imp_sheet, 1, 3, count, 3],
         "fill":       {"color": "#70AD47"},
-        "data_labels": {"value": True, "num_format": "0%"},
+        "data_labels": {"value": True, "num_format": "0%;;"},
     })
     chart_bar.add_series({
         "name": "负相关因素",
         "categories": [imp_sheet, 1, 0, count, 0],
         "values":     [imp_sheet, 1, 4, count, 4],
         "fill":       {"color": "#C00000"},
-        "data_labels": {"value": True, "num_format": "0%"},
+        "data_labels": {"value": True, "num_format": "0%;;"},
     })
     chart_bar.set_title({"name": "多因素贡献度排名"})
     chart_bar.set_y_axis({"reverse": True})

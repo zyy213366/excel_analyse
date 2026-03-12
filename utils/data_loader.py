@@ -1,4 +1,4 @@
-"""Excel 数据读取与清洗模块"""
+"""数据文件读取与清洗模块（支持 Excel / CSV）"""
 import pandas as pd
 import numpy as np
 from pathlib import Path
@@ -7,13 +7,39 @@ from config import MISSING_RATE_THRESHOLD
 
 def load_excel(file_path: str) -> tuple[pd.DataFrame, list[str]]:
     """
-    读取 Excel 文件，返回 (DataFrame, 所有列名列表)
-    对列名做基础清洗（去首尾空格）
+    读取 Excel 或 CSV 文件，返回 (DataFrame, 所有列名列表)。
+    CSV 文件自动尝试 utf-8 → gbk 编码，自动检测分隔符。
+    对列名做基础清洗（去首尾空格）。
     """
     pd.set_option("future.no_silent_downcasting", True)
-    df = pd.read_excel(file_path)
+    suffix = Path(file_path).suffix.lower()
+
+    if suffix == ".csv":
+        df = _read_csv(file_path)
+    else:
+        df = pd.read_excel(file_path)
+
     df.columns = [str(c).strip() for c in df.columns]
     return df, list(df.columns)
+
+
+def _read_csv(file_path: str) -> pd.DataFrame:
+    """尝试多种编码和分隔符读取 CSV"""
+    encodings = ["utf-8-sig", "utf-8", "gbk", "gb2312", "latin1"]
+    separators = [",", ";", "\t"]
+
+    for enc in encodings:
+        for sep in separators:
+            try:
+                df = pd.read_csv(file_path, encoding=enc, sep=sep)
+                # 至少有 2 列才算正确分隔
+                if len(df.columns) >= 2:
+                    return df
+            except Exception:
+                continue
+
+    # 最后兜底：用 utf-8 逗号分隔
+    return pd.read_csv(file_path, encoding="utf-8", sep=",")
 
 
 def get_numeric_columns(df: pd.DataFrame) -> list[str]:

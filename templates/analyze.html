@@ -1,0 +1,475 @@
+{% extends "base.html" %}
+{% block title %}智能分析 - Excel 智能分析助手{% endblock %}
+{% block header_title %}智能分析工作台{% endblock %}
+{% block header_sub %}上传 Excel，用自然语言描述分析需求{% endblock %}
+
+{% block content %}
+<div class="analyze-layout" x-data="analyzeApp('{{ prefill_instruction }}')" x-init="init()">
+
+  <!-- ── 左侧：文件面板 ── -->
+  <div class="file-panel">
+    <div class="file-panel-title">📂 数据文件</div>
+
+    <!-- 上传区 -->
+    <div class="upload-zone"
+         :class="{'drag-over': isDragging}"
+         @dragover.prevent="isDragging=true"
+         @dragleave="isDragging=false"
+         @drop.prevent="handleDrop($event)"
+         @click="$refs.fileInput.click()">
+      <input type="file" x-ref="fileInput" accept=".xlsx,.xls,.csv"
+             style="display:none" @change="handleFileChange($event)">
+      <div class="upload-zone-icon">📄</div>
+      <div class="upload-zone-text" x-text="fileId ? '点击重新上传' : '点击或拖拽上传'"></div>
+      <div class="upload-zone-sub">.xlsx / .xls / .csv 格式</div>
+    </div>
+
+    <!-- 文件信息 -->
+    <template x-if="fileId">
+      <div class="file-info">
+        <div class="file-info-name" x-text="filename"></div>
+        <div class="file-info-meta" x-text="`${rowCount} 行数据`"></div>
+      </div>
+    </template>
+
+    <!-- 列名 -->
+    <template x-if="columns.length > 0">
+      <div class="columns-section">
+        <div class="columns-label">检测到的数值列：</div>
+        <div class="columns-chips">
+          <template x-for="col in columns" :key="col">
+            <span class="column-chip" x-text="col"></span>
+          </template>
+        </div>
+      </div>
+    </template>
+
+    <!-- 分隔线 -->
+    <div style="border-top:1px solid var(--border); margin: 14px 0;"></div>
+
+    <!-- AI 模式开关 -->
+    <div class="ai-toggle">
+      <span>AI 自然语言解析</span>
+      <label class="toggle-switch">
+        <input type="checkbox" x-model="useAI">
+        <span class="toggle-slider"></span>
+      </label>
+    </div>
+
+    <!-- ── AI 解析预览卡片（AI 开启且有解析结果时显示）── -->
+    <template x-if="useAI && lastIntent">
+      <div class="intent-preview-card">
+        <div class="intent-preview-title">🤖 AI 解析预览</div>
+        <!-- 模式 badge -->
+        <div style="margin-bottom:8px;">
+          <span class="intent-mode-badge" x-text="modeLabel(lastIntent.mode)"></span>
+          <!-- 指令理解程度 -->
+          <span class="intent-conf-text"
+                x-text="`理解程度 ${Math.round(lastIntent.confidence * 100)}%`"
+                :style="lastIntent.confidence >= 0.8 ? 'color:#2a7d5f' : (lastIntent.confidence >= 0.6 ? 'color:#e6a23c' : 'color:#e05a5a')">
+          </span>
+        </div>
+        <!-- 指令理解程度进度条 -->
+        <div class="intent-conf-bar">
+          <div class="intent-conf-fill"
+               :style="`width:${Math.round(lastIntent.confidence*100)}%; background:${lastIntent.confidence>=0.8?'#2a7d5f':(lastIntent.confidence>=0.6?'#e6a23c':'#e05a5a')}`">
+          </div>
+        </div>
+        <!-- 目标变量 -->
+        <template x-if="lastIntent.target_y">
+          <div class="intent-row">
+            <span class="intent-label">目标变量 Y</span>
+            <span class="intent-value-chip" x-text="lastIntent.target_y"></span>
+          </div>
+        </template>
+        <!-- 自变量 -->
+        <template x-if="lastIntent.x_cols && lastIntent.x_cols.length > 0">
+          <div class="intent-row" style="align-items:flex-start;">
+            <span class="intent-label">自变量 X</span>
+            <div style="display:flex;flex-wrap:wrap;gap:4px;">
+              <template x-for="col in lastIntent.x_cols.slice(0,6)" :key="col">
+                <span class="intent-x-chip" x-text="col"></span>
+              </template>
+              <template x-if="lastIntent.x_cols.length > 6">
+                <span class="intent-x-chip" style="opacity:.6;"
+                      x-text="`+${lastIntent.x_cols.length - 6} 列`"></span>
+              </template>
+            </div>
+          </div>
+        </template>
+        <!-- AI 理解说明 -->
+        <template x-if="lastIntent.hint">
+          <div class="intent-hint" x-text="lastIntent.hint"></div>
+        </template>
+      </div>
+    </template>
+
+    <!-- 手动模式（AI 关闭时显示） -->
+    <template x-if="!useAI">
+      <div style="margin-top:12px;">
+        <div class="form-group" style="margin-bottom:10px;">
+          <label class="form-label">分析模式</label>
+          <select x-model="manualMode" class="form-input">
+            <option value="y_vs_all">全因素分析</option>
+            <option value="two_column">双列关系</option>
+            <option value="multi_x_vs_y">多因素回归</option>
+          </select>
+        </div>
+        <div class="form-group" style="margin-bottom:10px;">
+          <label class="form-label">目标变量 (Y)</label>
+          <select x-model="manualY" class="form-input"
+                  @change="manualXCols = columns.filter(c => c !== manualY)">
+            <template x-for="col in columns" :key="col">
+              <option :value="col" x-text="col"></option>
+            </template>
+          </select>
+        </div>
+        <template x-if="manualMode !== 'y_vs_all'">
+          <div class="form-group">
+            <label class="form-label">自变量 (X)</label>
+            <template x-for="col in columns.filter(c => c !== manualY)" :key="col">
+              <label style="display:flex;align-items:center;gap:6px;margin-bottom:4px;font-size:13px;cursor:pointer;">
+                <input type="checkbox" :value="col" x-model="manualXCols"> <span x-text="col"></span>
+              </label>
+            </template>
+          </div>
+        </template>
+
+        <!-- ── 手动配置实时预览（有文件时显示）── -->
+        <template x-if="fileId && manualY">
+          <div class="intent-preview-card" style="margin-top:12px;">
+            <div class="intent-preview-title">⚙️ 当前分析配置</div>
+            <div style="margin-bottom:8px;">
+              <span class="intent-mode-badge" x-text="modeLabel(manualMode)"></span>
+              <span style="font-size:11px;color:#2a7d5f;font-weight:600;">手动配置</span>
+            </div>
+            <div class="intent-conf-bar">
+              <div class="intent-conf-fill" style="width:100%;background:#2a7d5f;"></div>
+            </div>
+            <div class="intent-row">
+              <span class="intent-label">目标变量 Y</span>
+              <span class="intent-value-chip" x-text="manualY"></span>
+            </div>
+            <template x-if="manualMode !== 'y_vs_all' && manualXCols.length > 0">
+              <div class="intent-row" style="align-items:flex-start;">
+                <span class="intent-label">自变量 X</span>
+                <div style="display:flex;flex-wrap:wrap;gap:4px;">
+                  <template x-for="col in manualXCols.slice(0,6)" :key="col">
+                    <span class="intent-x-chip" x-text="col"></span>
+                  </template>
+                  <template x-if="manualXCols.length > 6">
+                    <span class="intent-x-chip" style="opacity:.6;"
+                          x-text="`+${manualXCols.length - 6} 列`"></span>
+                  </template>
+                </div>
+              </div>
+            </template>
+            <template x-if="manualMode === 'y_vs_all'">
+              <div class="intent-hint">将分析所有数值列对 <strong x-text="manualY"></strong> 的影响</div>
+            </template>
+          </div>
+        </template>
+      </div>
+    </template>
+  </div>
+
+  <!-- ── 右侧：聊天面板 ── -->
+  <div class="chat-panel">
+    <!-- 消息流 -->
+    <div class="chat-messages" x-ref="chatMessages">
+
+      <!-- 空状态 -->
+      <template x-if="messages.length === 0">
+        <div class="chat-empty">
+          <div class="chat-empty-icon">💬</div>
+          <div class="chat-empty-text">上传文件后，输入分析指令开始对话</div>
+          <div style="font-size:12px;color:var(--text-muted);margin-top:4px;">
+            例：帮我分析哪些因素对销售额影响最大
+          </div>
+        </div>
+      </template>
+
+      <!-- 消息列表 -->
+      <template x-for="(msg, idx) in messages" :key="idx">
+        <div>
+          <!-- 用户气泡 -->
+          <template x-if="msg.role === 'user'">
+            <div class="message-user" x-text="msg.content"></div>
+          </template>
+
+          <!-- 助手气泡 -->
+          <template x-if="msg.role === 'assistant'">
+            <div class="message-assistant">
+              <!-- Intent Badge -->
+              <template x-if="msg.intent">
+                <div>
+                  <span class="intent-badge">
+                    🤖 <span x-text="modeLabel(msg.intent.mode)"></span>
+                    · <span x-text="`理解程度 ${Math.round(msg.intent.confidence * 100)}%`"></span>
+                  </span>
+                  <div style="font-size:12px;color:var(--text-secondary);margin-bottom:10px;" x-text="msg.intent.hint"></div>
+                </div>
+              </template>
+              <!-- 数据信息 -->
+              <template x-if="msg.dataInfo">
+                <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px;"
+                     x-text="`📊 原始 ${msg.dataInfo.raw} 行 → 有效 ${msg.dataInfo.valid} 行`"></div>
+              </template>
+              <!-- Markdown 内容 -->
+              <div class="md-content" x-html="renderMd(msg.content)"></div>
+              <!-- 下载按钮 -->
+              <template x-if="msg.reportFile">
+                <a :href="`/api/download/${msg.reportFile}`"
+                   class="download-btn" download>
+                  📥 下载 Excel 分析报告
+                </a>
+              </template>
+            </div>
+          </template>
+        </div>
+      </template>
+
+      <!-- ── 思考动画 ── -->
+      <template x-if="isLoading">
+        <div class="thinking-box">
+          <div class="thinking-header">
+            <div class="thinking-spinner"></div>
+            <span class="thinking-title">AI 正在分析中...</span>
+          </div>
+          <div class="thinking-steps">
+            <template x-for="(step, i) in thinkSteps" :key="i">
+              <div class="thinking-step" :class="thinkStepClass(i)">
+                <span class="thinking-step-icon" x-text="step.icon"></span>
+                <span class="thinking-step-label" x-text="step.label"></span>
+                <span class="thinking-step-status">
+                  <template x-if="i < thinkStep">✓</template>
+                  <template x-if="i === thinkStep">
+                    <span class="thinking-pulse"></span>
+                  </template>
+                </span>
+              </div>
+            </template>
+          </div>
+          <div class="thinking-elapsed" x-text="`已用时 ${thinkElapsed}s`"></div>
+        </div>
+      </template>
+    </div>
+
+    <!-- 输入区 -->
+    <div class="chat-input-area">
+      <textarea
+        class="chat-input"
+        x-model="instruction"
+        :disabled="!fileId || isLoading"
+        :placeholder="fileId ? '输入分析指令，例：帮我分析销售额受哪些因素影响...' : '请先上传 Excel 文件'"
+        rows="1"
+        @keydown.enter.prevent="if(!$event.shiftKey) sendMessage()"
+        @input="autoResize($el)"
+      ></textarea>
+      <button class="send-btn"
+              :disabled="!fileId || !instruction.trim() || isLoading"
+              @click="sendMessage()">
+        发送 ▶
+      </button>
+    </div>
+  </div>
+
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function analyzeApp(prefillInstruction) {
+  return {
+    // 状态
+    fileId: null,
+    filename: '',
+    rowCount: 0,
+    columns: [],
+    messages: [],
+    instruction: prefillInstruction || '',
+    isLoading: false,
+    isDragging: false,
+    useAI: true,
+    manualMode: 'y_vs_all',
+    manualY: '',
+    manualXCols: [],
+
+    // AI 解析预览
+    lastIntent: null,
+
+    // 思考动画
+    thinkStep: 0,
+    thinkElapsed: 0,
+    _thinkTimer: null,
+    _elapsedTimer: null,
+    thinkSteps: [
+      { icon: '🔍', label: '解析分析指令' },
+      { icon: '📂', label: '读取数据集' },
+      { icon: '⚙️', label: '执行统计计算' },
+      { icon: '📝', label: '生成分析报告' },
+    ],
+
+    init() {
+      if (this.instruction) {
+        this.$nextTick(() => {
+          const el = document.querySelector('.chat-input');
+          if (el) el.focus();
+        });
+      }
+    },
+
+    // ── 思考动画控制 ──
+    startThinking() {
+      this.thinkStep = 0;
+      this.thinkElapsed = 0;
+      // 步骤推进：每 1.2s 进入下一步
+      this._thinkTimer = setInterval(() => {
+        if (this.thinkStep < this.thinkSteps.length - 1) {
+          this.thinkStep++;
+        }
+      }, 1200);
+      // 计时器：每秒 +1
+      this._elapsedTimer = setInterval(() => {
+        this.thinkElapsed++;
+      }, 1000);
+    },
+    stopThinking() {
+      clearInterval(this._thinkTimer);
+      clearInterval(this._elapsedTimer);
+      this._thinkTimer = null;
+      this._elapsedTimer = null;
+    },
+    thinkStepClass(i) {
+      if (i < this.thinkStep) return 'step-done';
+      if (i === this.thinkStep) return 'step-active';
+      return 'step-pending';
+    },
+
+    // ── 文件处理 ──
+    handleFileChange(event) {
+      const file = event.target.files[0];
+      if (file) this.uploadFile(file);
+    },
+    handleDrop(event) {
+      this.isDragging = false;
+      const file = event.dataTransfer.files[0];
+      if (file) this.uploadFile(file);
+    },
+    async uploadFile(file) {
+      const formData = new FormData();
+      formData.append('file', file);
+      try {
+        const res = await fetch('/api/upload', { method: 'POST', body: formData });
+        const data = await res.json();
+        if (data.file_id) {
+          this.fileId = data.file_id;
+          this.filename = data.filename;
+          this.rowCount = data.row_count;
+          this.columns = data.numeric_columns;
+          this.manualY = this.columns[0] || '';
+          this.manualXCols = this.columns.slice(1);
+          this.messages = [];
+          this.lastIntent = null;
+        } else {
+          alert('上传失败：' + (data.detail || '未知错误'));
+        }
+      } catch (e) {
+        alert('上传失败：' + e.message);
+      }
+    },
+
+    // ── 发送分析 ──
+    async sendMessage() {
+      if (!this.fileId || !this.instruction.trim() || this.isLoading) return;
+
+      const userMsg = this.instruction.trim();
+      this.messages.push({ role: 'user', content: userMsg });
+      this.instruction = '';
+      this.isLoading = true;
+      this.startThinking();
+      this.scrollToBottom();
+
+      try {
+        const res = await fetch('/api/analyze', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            file_id: this.fileId,
+            instruction: userMsg,
+            use_ai: this.useAI,
+            manual_mode: this.manualMode,
+            manual_y: this.manualY,
+            manual_x_cols: this.manualXCols,
+          }),
+        });
+        const data = await res.json();
+
+        if (data.success) {
+          // 更新 AI 解析预览：AI 模式取服务端 intent，手动模式合成
+          if (data.intent) {
+            this.lastIntent = data.intent;
+          } else if (!this.useAI) {
+            const xCols = this.manualMode === 'y_vs_all'
+              ? this.columns.filter(c => c !== this.manualY)
+              : this.manualXCols.slice();
+            this.lastIntent = {
+              mode: this.manualMode,
+              target_y: this.manualY,
+              x_cols: xCols,
+              hint: `手动配置：${this.modeLabel(this.manualMode)}`,
+              confidence: 1.0,
+            };
+          }
+          this.messages.push({
+            role: 'assistant',
+            content: data.summary_text,
+            intent: data.intent,
+            reportFile: data.report_filename,
+            dataInfo: data.data_info,
+          });
+        } else {
+          this.messages.push({
+            role: 'assistant',
+            content: '❌ **分析失败**\n\n' + (data.error || '未知错误'),
+            intent: null,
+            reportFile: null,
+          });
+        }
+      } catch (e) {
+        this.messages.push({
+          role: 'assistant',
+          content: '❌ **请求失败**\n\n' + e.message,
+          intent: null,
+          reportFile: null,
+        });
+      } finally {
+        this.stopThinking();
+        this.isLoading = false;
+        this.scrollToBottom();
+      }
+    },
+
+    // ── 工具函数 ──
+    renderMd(text) {
+      if (!text) return '';
+      return marked.parse(text);
+    },
+    modeLabel(mode) {
+      const map = { y_vs_all: '全因素分析', two_column: '双列关系', multi_x_vs_y: '多因素回归' };
+      return map[mode] || mode;
+    },
+    scrollToBottom() {
+      this.$nextTick(() => {
+        const el = this.$refs.chatMessages;
+        if (el) el.scrollTop = el.scrollHeight;
+      });
+    },
+    autoResize(el) {
+      el.style.height = 'auto';
+      el.style.height = Math.min(el.scrollHeight, 120) + 'px';
+    },
+  };
+}
+</script>
+{% endblock %}

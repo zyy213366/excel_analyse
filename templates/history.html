@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% block title %}历史记录 - Excel 智能分析助手{% endblock %}
+{% block header_title %}历史记录{% endblock %}
+{% block header_sub %}过去生成的分析报告{% endblock %}
+
+{% block content %}
+<div class="main-body" x-data="historyApp()" x-init="load()">
+  <div class="section-title">📋 分析报告列表</div>
+
+  <!-- 加载中 -->
+  <template x-if="loading">
+    <div style="color:var(--text-muted);padding:40px;text-align:center;">加载中...</div>
+  </template>
+
+  <!-- 空状态 -->
+  <template x-if="!loading && records.length === 0">
+    <div style="color:var(--text-muted);padding:60px;text-align:center;">
+      <div style="font-size:48px;margin-bottom:12px;">📭</div>
+      <div>暂无历史记录，去<a href="/analyze" style="color:var(--accent);">智能分析</a>生成第一份报告吧</div>
+    </div>
+  </template>
+
+  <!-- 列表 -->
+  <template x-if="!loading && records.length > 0">
+    <table class="history-table">
+      <thead>
+        <tr>
+          <th>文件名</th>
+          <th>大小</th>
+          <th>操作</th>
+        </tr>
+      </thead>
+      <tbody>
+        <template x-for="r in records" :key="r.filename">
+          <tr>
+            <td>
+              <span style="font-size:16px;margin-right:6px;">📊</span>
+              <span x-text="r.display_name" style="font-family:monospace;font-size:12px;"></span>
+            </td>
+            <td style="color:var(--text-muted);" x-text="`${r.size_kb} KB`"></td>
+            <td>
+              <a :href="`/api/download/${r.filename}`"
+                 class="download-btn" download
+                 style="font-size:12px;padding:5px 12px;">
+                📥 下载
+              </a>
+            </td>
+          </tr>
+        </template>
+      </tbody>
+    </table>
+  </template>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function historyApp() {
+  return {
+    records: [],
+    loading: true,
+    async load() {
+      const res = await fetch('/api/history');
+      this.records = await res.json();
+      this.loading = false;
+    }
+  };
+}
+</script>
+{% endblock %}
