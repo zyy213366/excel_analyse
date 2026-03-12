@@ -33,13 +33,27 @@ _uploaded_files: dict[str, Path] = load_all_uploads()
 
 
 # ──────────────────────────────────────────────────────────
-# ModelScope 健康检查（平台每 5s 轮询 /config，需返回 200）
+# ModelScope / Gradio 兼容接口
+# ModelScope 平台用 modelscope-gradio JS 加载所有 Docker 应用，
+# 会轮询 /config、/info、/queue/status，404 会导致永久卡在加载中
 # ──────────────────────────────────────────────────────────
 
 @router.get("/config")
 async def ms_config():
-    """ModelScope 平台健康检查接口，返回 200 即可"""
-    return {"status": "ok", "version": "2.0"}
+    return {"status": "NORMAL", "version": "2.0", "mode": "docker",
+            "dev_mode": False, "analytics_enabled": False,
+            "components": [], "title": "Excel 智能分析助手",
+            "is_space": True, "enable_queue": False}
+
+
+@router.get("/info")
+async def ms_info():
+    return {"named_endpoints": {}, "unnamed_endpoints": {}}
+
+
+@router.get("/queue/status")
+async def ms_queue_status():
+    return {"queue_size": 0, "status": "COMPLETE", "success": True}
 
 
 # ──────────────────────────────────────────────────────────
