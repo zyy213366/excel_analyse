@@ -1,0 +1,26 @@
+name: Sync to ModelScope Studio
+
+on:
+  push:
+    branches:
+      - master
+
+jobs:
+  sync-to-modelscope:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          lfs: true
+
+      - name: Push to ModelScope Studio
+        env:
+          MS_TOKEN:    ${{ secrets.MS_TOKEN }}
+          MS_USERNAME: ${{ secrets.MS_USERNAME }}
+        run: |
+          git config --global user.email "action@github.com"
+          git config --global user.name  "GitHub Action"
+          git push https://$MS_USERNAME:$MS_TOKEN@www.modelscope.cn/studios/$MS_USERNAME/excel-analyzer.git \
+            master:master --force
