@@ -7,9 +7,9 @@ import sqlite3
 import threading
 from datetime import datetime
 from pathlib import Path
-from config import BASE_DIR
+from config import DATA_DIR
 
-DB_PATH = BASE_DIR / "data.db"
+DB_PATH = DATA_DIR / "data.db"
 
 # 线程本地连接
 _local = threading.local()

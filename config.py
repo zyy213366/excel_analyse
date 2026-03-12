@@ -13,6 +13,8 @@ DEEPSEEK_MODEL: str = os.getenv("DEEPSEEK_MODEL", "deepseek-ai/DeepSeek-V3")
 
 # 路径配置
 BASE_DIR = Path(__file__).parent
+# 云端部署时可通过 DATA_DIR 环境变量将数据库、上传、输出目录指向持久化挂载点
+DATA_DIR = Path(os.getenv("DATA_DIR", str(BASE_DIR)))
 OUTPUTS_DIR = BASE_DIR / "outputs"
 PROMPTS_DIR = BASE_DIR / "prompts"
 
