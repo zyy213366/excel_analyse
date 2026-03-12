@@ -1,9 +1,11 @@
 ---
-license: apache-2.0
-tags:
-- gradio
-- excel
-- data-analysis
+title: Excel 智能分析助手
+emoji: 📊
+colorFrom: green
+colorTo: teal
+sdk: docker
+app_port: 7860
+license: mit
 ---
 
 # 📊 Excel 智能分析助手
