@@ -113,6 +113,14 @@
             <option value="y_vs_all">全因素分析</option>
             <option value="two_column">双列关系</option>
             <option value="multi_x_vs_y">多因素回归</option>
+            <option value="time_series">时间序列分析（趋势+ADF+ARIMA）</option>
+            <option value="pca">PCA 主成分降维</option>
+            <option value="anova">ANOVA 方差分析（组间差异）</option>
+            <option value="logistic">逻辑回归（二元分类）</option>
+            <option value="cluster">K-Means 聚类分析</option>
+            <option value="neural_reg">神经网络回归（MLP）</option>
+            <option value="ridge_lasso">岭回归 / 套索回归</option>
+            <option value="model_comparison">多模型对比（AutoML-lite）</option>
           </select>
         </div>
         <div class="form-group" style="margin-bottom:10px;">
@@ -254,6 +262,16 @@
         </div>
       </template>
     </div>
+
+    <!-- 快捷按钮 -->
+    <template x-if="fileId && !isLoading">
+      <div style="padding:4px 12px 0;display:flex;gap:6px;flex-wrap:wrap;">
+        <button class="send-btn" style="font-size:12px;padding:4px 10px;background:#7030A0;"
+                @click="runModelComparison()">
+          🏆 多模型对比
+        </button>
+      </div>
+    </template>
 
     <!-- 输入区 -->
     <div class="chat-input-area">
@@ -456,7 +474,12 @@ function analyzeApp(prefillInstruction) {
       return marked.parse(text);
     },
     modeLabel(mode) {
-      const map = { y_vs_all: '全因素分析', two_column: '双列关系', multi_x_vs_y: '多因素回归' };
+      const map = {
+        y_vs_all: '全因素分析', two_column: '双列关系', multi_x_vs_y: '多因素回归',
+        time_series: '时间序列分析', pca: 'PCA 主成分降维', anova: 'ANOVA 方差分析',
+        logistic: '逻辑回归', cluster: 'K-Means 聚类', neural_reg: '神经网络回归', ridge_lasso: '岭/套索回归',
+        model_comparison: '多模型对比',
+      };
       return map[mode] || mode;
     },
     scrollToBottom() {
@@ -468,6 +491,18 @@ function analyzeApp(prefillInstruction) {
     autoResize(el) {
       el.style.height = 'auto';
       el.style.height = Math.min(el.scrollHeight, 120) + 'px';
+    },
+
+    // 一键多模型对比
+    runModelComparison() {
+      this.instruction = '对比所有模型，找出预测效果最佳的模型';
+      // 临时切换为 model_comparison 模式（手动模式下也生效）
+      const prevMode = this.manualMode;
+      this.manualMode = 'model_comparison';
+      this.sendMessage().finally(() => {
+        // 发送完成后恢复原模式
+        if (!this.useAI) this.manualMode = prevMode;
+      });
     },
   };
 }

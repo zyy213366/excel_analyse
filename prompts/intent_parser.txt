@@ -7,6 +7,13 @@
 - **y_vs_all**: 分析所有因素对某一目标变量的影响（例："分析哪些因素影响了销售额"）
 - **two_column**: 分析两个具体列之间的关系（例："分析温度和销售额的关系"）
 - **multi_x_vs_y**: 分析多个特定因素对目标变量的影响（例："分析温度、湿度和时间对销量的影响"）
+- **time_series**: 用于时间序列分析，当用户提到时间趋势、季节性、预测、走势、周期时使用。需要一个时间列（target_y）和一个数值列（x_columns 第一个元素）。
+- **pca**: 用于主成分分析/降维，当用户提到 PCA、降维、主成分、factor analysis 时使用。x_columns 为参与分析的列，target_y 可为空。
+- **anova**: 用于组间差异分析，当用户提到方差分析、ANOVA、组间差异、各组比较时使用。target_y 为数值列，x_columns 第一个元素为分组变量列。
+- **logistic**: 用于分类预测，当用户提到逻辑回归、二元分类、0/1预测、是否/达标时使用。target_y 为二元目标列。
+- **cluster**: 用于聚类/分组发现，当用户提到 K-Means、聚类、分群、客户分群时使用。x_columns 为参与聚类的列，target_y 可为空。
+- **neural_reg**: 用于神经网络回归，当用户提到神经网络、深度学习、MLP、非线性回归时使用。
+- **ridge_lasso**: 用于正则化回归，当用户提到岭回归、套索、Lasso、Ridge、正则化时使用。
 
 ## 列名匹配规则
 1. 必须从上面"可用列名"中选择，不得捏造不存在的列名
@@ -17,7 +24,7 @@
 ## 输出格式
 只输出纯 JSON，不要任何额外说明或 markdown 代码块：
 {
-  "analysis_mode": "y_vs_all | two_column | multi_x_vs_y",
+  "analysis_mode": "y_vs_all | two_column | multi_x_vs_y | time_series | pca | anova | logistic | cluster | neural_reg | ridge_lasso",
   "target_y": "目标列名（必须在可用列名中）",
   "x_columns": ["自变量列名1", "自变量列名2"],
   "analysis_hint": "用一句话说明你理解的分析意图",
@@ -31,4 +38,8 @@
   * 若用户未明确指定 X 列（如只说"多元回归"、"共线性检测"、"特征重要性"），
     则将【所有可用列名（除 target_y 外）】全部填入 x_columns
   * target_y 优先取用户明确提到的列；若完全没提，取可用列名中的最后一列
+- time_series 模式：target_y 为数值列（被分析的值），x_columns[0] 为时间列
+- pca / cluster 模式：x_columns 为参与分析的列，target_y 可为空字符串
+- anova 模式：target_y 为数值列，x_columns[0] 为分组变量
+- logistic / neural_reg / ridge_lasso 模式：target_y 为目标列，x_columns 为自变量列
 - confidence < 0.6 表示解析把握不足，界面将提示用户手动确认

@@ -53,6 +53,70 @@ class AnalysisResult:
     collinearity_warnings: list[str] = field(default_factory=list)
     x_corr_matrix: Optional[pd.DataFrame] = None          # X 间相关矩阵
 
+    # ── 时序分析 (time_series) ──────────────────────────────
+    time_col: str = ""
+    value_col: str = ""
+    ts_trend_slope: float = 0.0           # 趋势斜率（线性）
+    ts_trend_r2: float = 0.0              # 趋势线 R²
+    ts_adf_stat: float = 0.0              # ADF 检验统计量
+    ts_adf_pvalue: float = 1.0            # ADF p 值（<0.05 则平稳）
+    ts_decompose_df: Optional[pd.DataFrame] = None   # trend/seasonal/residual
+    ts_forecast_df: Optional[pd.DataFrame] = None    # 预测值（若 ARIMA 成功）
+    ts_arima_order: tuple = ()             # (p,d,q)
+
+    # ── PCA 分析 ────────────────────────────────────────────
+    pca_n_components: int = 0
+    pca_explained_ratio: list[float] = field(default_factory=list)  # 每个主成分方差贡献率
+    pca_cumulative_ratio: list[float] = field(default_factory=list)  # 累计方差贡献率
+    pca_loadings_df: Optional[pd.DataFrame] = None  # 载荷矩阵（列=主成分，行=原始变量）
+    pca_scores_df: Optional[pd.DataFrame] = None    # 主成分得分
+
+    # ── ANOVA 分析 ──────────────────────────────────────────
+    anova_group_col: str = ""
+    anova_f_stat: float = 0.0
+    anova_p_value: float = 1.0
+    anova_eta_squared: float = 0.0        # 效应量 η²
+    anova_group_stats_df: Optional[pd.DataFrame] = None  # 各组 n/mean/std
+    anova_tukey_df: Optional[pd.DataFrame] = None        # Tukey HSD 两两比较
+
+    # ── 逻辑回归 (logistic) ──────────────────────────────────
+    logistic_coef_df: Optional[pd.DataFrame] = None  # Feature / Coef / OddsRatio / p_value
+    logistic_accuracy: float = 0.0
+    logistic_auc: float = 0.0
+    logistic_classes: list = field(default_factory=list)
+
+    # ── 聚类分析 (cluster) ───────────────────────────────────
+    cluster_n: int = 0
+    cluster_inertia_list: list[float] = field(default_factory=list)  # 肘部法则 SSE
+    cluster_labels: Optional[pd.Series] = None       # 每行的簇标签
+    cluster_centers_df: Optional[pd.DataFrame] = None  # 簇中心
+    cluster_stats_df: Optional[pd.DataFrame] = None    # 各簇样本数/均值
+
+    # ── 神经网络回归 (neural_reg) ────────────────────────────
+    neural_r2_train: float = 0.0
+    neural_r2_test: float = 0.0
+    neural_mae_test: float = 0.0
+    neural_vs_linear_r2: float = 0.0   # 同数据线性回归 R²（对比用）
+    neural_hidden_layers: tuple = ()
+
+    # ── 岭/套索回归 (ridge_lasso) ────────────────────────────
+    ridge_lasso_type: str = ""          # "ridge" / "lasso" / "both"
+    ridge_best_alpha: float = 0.0
+    lasso_best_alpha: float = 0.0
+    ridge_coef_df: Optional[pd.DataFrame] = None  # Feature / Ridge_Coef / Lasso_Coef / OLS_Coef
+    ridge_r2: float = 0.0
+    lasso_r2: float = 0.0
+    lasso_selected_features: list[str] = field(default_factory=list)  # Lasso 保留的非零特征
+
+    # ── 模型对比 (model_comparison) ─────────────────────────
+    mc_x_columns: list[str] = field(default_factory=list)   # 参与建模的 X 列
+    mc_comparison_df: Optional[pd.DataFrame] = None          # 模型对比汇总表
+    mc_best_model_name: str = ""                              # 最优模型名称
+    mc_best_model_r2: float = 0.0                            # 最优模型 R²
+    mc_predictions: dict = field(default_factory=dict)        # {模型名: {"actual": [...], "predicted": [...], "residual": [...]}}
+    mc_feature_types: dict = field(default_factory=dict)      # {列名: "continuous" / "categorical"}
+    mc_cv_scores: dict = field(default_factory=dict)          # {模型名: [cv_r2_fold1, fold2, ...]}
+
 
 # ──────────────────────────────────────────────────────────
 # 模式1：Y vs All
@@ -364,3 +428,756 @@ def analyze_multi_x_vs_y(df: pd.DataFrame, target_y: str, x_columns: list[str]) 
         plot_df=plot_data,
         stats_df=stats_tbl,
     )
+
+
+# ──────────────────────────────────────────────────────────
+# 模式4：时间序列分析
+# ──────────────────────────────────────────────────────────
+
+def analyze_time_series(df: pd.DataFrame, time_col: str, value_col: str) -> AnalysisResult:
+    """
+    时间序列分析：线性趋势 + ADF平稳性检验 + 季节分解（若数据量足够）+ ARIMA预测（可选）
+    time_col：时间列（日期字符串或数值序号皆可）
+    value_col：分析的数值列
+    """
+    result = AnalysisResult(
+        mode="time_series",
+        target_y=value_col,
+        x_columns=[time_col],
+        valid_row_count=len(df),
+        raw_row_count=len(df),
+        time_col=time_col,
+        value_col=value_col,
+    )
+
+    y = df[value_col].values
+    n = len(y)
+    x_idx = np.arange(n)
+
+    # 线性趋势
+    slope, intercept, r, p, _ = stats.linregress(x_idx, y)
+    result.ts_trend_slope = float(slope)
+    result.ts_trend_r2 = float(r ** 2)
+
+    # ADF 平稳性检验
+    try:
+        from statsmodels.tsa.stattools import adfuller
+        adf_result = adfuller(y, autolag="AIC")
+        result.ts_adf_stat = float(adf_result[0])
+        result.ts_adf_pvalue = float(adf_result[1])
+    except Exception:
+        result.ts_adf_stat = 0.0
+        result.ts_adf_pvalue = 1.0
+
+    # 季节分解（需要至少 2 个周期，即 n >= 2*freq）
+    if n >= 24:
+        try:
+            from statsmodels.tsa.seasonal import seasonal_decompose
+            freq = 12 if n >= 24 else (7 if n >= 14 else None)
+            if freq:
+                decomp = seasonal_decompose(y, model="additive", period=freq, extrapolate_trend="freq")
+                result.ts_decompose_df = pd.DataFrame({
+                    "trend":    decomp.trend,
+                    "seasonal": decomp.seasonal,
+                    "residual": decomp.resid,
+                })
+        except Exception:
+            pass
+
+    # ARIMA 预测（若 statsmodels 可用且数据量 >= 30）
+    if n >= 30:
+        try:
+            from statsmodels.tsa.arima.model import ARIMA
+            model = ARIMA(y, order=(1, 1, 1))
+            fit = model.fit()
+            forecast_steps = max(5, n // 10)
+            forecast = fit.forecast(steps=forecast_steps)
+            result.ts_forecast_df = pd.DataFrame({
+                "step":  range(1, forecast_steps + 1),
+                "value": forecast,
+            })
+            result.ts_arima_order = (1, 1, 1)
+        except Exception:
+            pass
+
+    # 生成 summary_text
+    stationary = result.ts_adf_pvalue < 0.05
+    trend_dir = "上升" if slope > 0 else "下降"
+    lines = [
+        f"## 📈 时间序列分析",
+        f"**分析列**：`{value_col}`  **时间列**：`{time_col}`  **样本量**：{n} 行",
+        f"",
+        f"### 趋势分析",
+        f"- 整体趋势：**{trend_dir}**（斜率 = {slope:.4f}，趋势 R² = {r**2:.4f}）",
+        f"",
+        f"### ADF 平稳性检验",
+        f"- ADF 统计量 = {result.ts_adf_stat:.4f}，p = {result.ts_adf_pvalue:.4f}",
+        f"- 序列{'**平稳**' if stationary else '**非平稳**'}（{'无需差分' if stationary else '建议一阶差分'}）",
+    ]
+    if result.ts_forecast_df is not None:
+        lines += [
+            f"",
+            f"### ARIMA(1,1,1) 预测",
+            f"- 已生成未来 {len(result.ts_forecast_df)} 期预测值",
+            f"- 预测下一期：{result.ts_forecast_df['value'].iloc[0]:.4f}",
+        ]
+    result.summary_text = "\n".join(lines)
+    return result
+
+
+# ──────────────────────────────────────────────────────────
+# 模式5：PCA 主成分分析
+# ──────────────────────────────────────────────────────────
+
+def analyze_pca(df: pd.DataFrame, columns: list[str], n_components: int = 0) -> AnalysisResult:
+    """
+    PCA 主成分分析：解释方差比 + 载荷矩阵 + 主成分得分
+    columns：参与 PCA 的数值列（至少 2 列）
+    n_components：主成分数，0 = 自动（保留解释方差 ≥ 80% 所需的最少成分数）
+    """
+    from sklearn.preprocessing import StandardScaler
+    from sklearn.decomposition import PCA
+
+    X = df[columns].dropna()
+    n, p = X.shape
+
+    # 标准化
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+
+    # 先用全量 PCA 得到解释方差
+    pca_full = PCA()
+    pca_full.fit(X_scaled)
+    explained = pca_full.explained_variance_ratio_
+
+    # 确定主成分数
+    if n_components <= 0:
+        cumsum = np.cumsum(explained)
+        n_components = int(np.searchsorted(cumsum, 0.80) + 1)
+        n_components = min(n_components, p)
+
+    n_components = min(n_components, p, n)
+
+    # 拟合目标维度
+    pca = PCA(n_components=n_components)
+    scores = pca.fit_transform(X_scaled)
+
+    cumulative = np.cumsum(pca.explained_variance_ratio_).tolist()
+    pc_names = [f"PC{i+1}" for i in range(n_components)]
+
+    loadings_df = pd.DataFrame(
+        pca.components_.T,
+        index=columns,
+        columns=pc_names,
+    )
+    scores_df = pd.DataFrame(scores, columns=pc_names)
+
+    result = AnalysisResult(
+        mode="pca",
+        target_y="",
+        x_columns=columns,
+        valid_row_count=n,
+        raw_row_count=len(df),
+        pca_n_components=n_components,
+        pca_explained_ratio=pca.explained_variance_ratio_.tolist(),
+        pca_cumulative_ratio=cumulative,
+        pca_loadings_df=loadings_df,
+        pca_scores_df=scores_df,
+    )
+
+    lines = [
+        f"## 🔬 PCA 主成分分析",
+        f"**输入变量**：{len(columns)} 个  **保留主成分**：{n_components} 个  **有效样本**：{n} 行",
+        f"",
+        f"### 方差贡献率",
+        f"| 主成分 | 个体方差贡献 | 累计贡献 |",
+        f"|--------|------------|---------|",
+    ]
+    for i, (r, c) in enumerate(zip(pca.explained_variance_ratio_, cumulative)):
+        lines.append(f"| PC{i+1} | {r:.1%} | {c:.1%} |")
+
+    lines += [
+        f"",
+        f"### 主要载荷（PC1 ~ PC{min(3, n_components)}）",
+        f"| 变量 | " + " | ".join(f"PC{i+1}" for i in range(min(3, n_components))) + " |",
+        f"|------| " + "------|" * min(3, n_components),
+    ]
+    for var in columns:
+        vals = [f"{loadings_df.loc[var, f'PC{i+1}']:+.3f}" for i in range(min(3, n_components))]
+        lines.append(f"| `{var}` | " + " | ".join(vals) + " |")
+
+    result.summary_text = "\n".join(lines)
+    return result
+
+
+# ──────────────────────────────────────────────────────────
+# 模式6：单因素 ANOVA + Tukey HSD
+# ──────────────────────────────────────────────────────────
+
+def analyze_anova(df: pd.DataFrame, target_y: str, group_col: str) -> AnalysisResult:
+    """
+    单因素 ANOVA：组间均值差异检验 + Tukey HSD 事后检验 + 效应量 η²
+    target_y：数值型因变量
+    group_col：分组变量（分类列或低基数数值列）
+    """
+    groups = {}
+    for gname, gdf in df.groupby(group_col):
+        groups[gname] = gdf[target_y].dropna().values
+
+    group_names = list(groups.keys())
+    group_arrays = list(groups.values())
+
+    # 单因素 ANOVA
+    f_stat, p_value = stats.f_oneway(*group_arrays)
+
+    # 效应量 η²（组间 SS / 总 SS）
+    grand_mean = df[target_y].mean()
+    ss_between = sum(len(g) * (g.mean() - grand_mean) ** 2 for g in group_arrays)
+    ss_total = sum(((g - grand_mean) ** 2).sum() for g in group_arrays)
+    eta_squared = ss_between / ss_total if ss_total > 0 else 0.0
+
+    # 各组描述统计
+    group_stats_rows = []
+    for gname, g in groups.items():
+        group_stats_rows.append({
+            "组别": str(gname),
+            "样本量": len(g),
+            "均值": round(float(g.mean()), 4),
+            "标准差": round(float(g.std(ddof=1)), 4),
+            "最小值": round(float(g.min()), 4),
+            "最大值": round(float(g.max()), 4),
+        })
+    group_stats_df = pd.DataFrame(group_stats_rows)
+
+    # Tukey HSD（需要 statsmodels）
+    tukey_df = None
+    try:
+        from statsmodels.stats.multicomp import pairwise_tukeyhsd
+        all_vals = np.concatenate(group_arrays)
+        all_labels = np.concatenate([[str(gn)] * len(g) for gn, g in groups.items()])
+        tukey = pairwise_tukeyhsd(all_vals, all_labels, alpha=0.05)
+        tukey_df = pd.DataFrame(
+            data=tukey._results_table.data[1:],
+            columns=tukey._results_table.data[0],
+        )
+    except Exception:
+        pass
+
+    result = AnalysisResult(
+        mode="anova",
+        target_y=target_y,
+        x_columns=[group_col],
+        valid_row_count=len(df),
+        raw_row_count=len(df),
+        anova_group_col=group_col,
+        anova_f_stat=float(f_stat),
+        anova_p_value=float(p_value),
+        anova_eta_squared=float(eta_squared),
+        anova_group_stats_df=group_stats_df,
+        anova_tukey_df=tukey_df,
+    )
+
+    sig_str = "**显著**（p<0.05）" if p_value < 0.05 else "**不显著**（p≥0.05）"
+    effect_str = "大" if eta_squared > 0.14 else ("中" if eta_squared > 0.06 else "小")
+    lines = [
+        f"## 📊 单因素 ANOVA 方差分析",
+        f"**因变量**：`{target_y}`  **分组变量**：`{group_col}`  **组数**：{len(groups)}",
+        f"",
+        f"### 检验结果",
+        f"- F 统计量 = {f_stat:.4f}，p = {p_value:.4f}",
+        f"- 结论：组间均值差异{sig_str}",
+        f"- 效应量 η² = {eta_squared:.4f}（{effect_str}效应）",
+    ]
+    result.summary_text = "\n".join(lines)
+    return result
+
+
+# ──────────────────────────────────────────────────────────
+# 模式7：逻辑回归
+# ──────────────────────────────────────────────────────────
+
+def analyze_logistic(df: pd.DataFrame, target_y: str, x_cols: list[str]) -> AnalysisResult:
+    """
+    逻辑回归：适用于二元目标变量（0/1）
+    输出系数、Odds Ratio、准确率、AUC-ROC
+    """
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.model_selection import train_test_split
+    from sklearn.preprocessing import StandardScaler
+    from sklearn.metrics import accuracy_score, roc_auc_score
+
+    X = df[x_cols].values
+    y = df[target_y].values
+    classes = sorted(set(y))
+
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+
+    X_train, X_test, y_train, y_test = train_test_split(
+        X_scaled, y, test_size=0.2, random_state=42, stratify=y if len(set(y)) == 2 else None
+    )
+
+    model = LogisticRegression(max_iter=1000, random_state=42)
+    model.fit(X_train, y_train)
+
+    y_pred = model.predict(X_test)
+    accuracy = float(accuracy_score(y_test, y_pred))
+
+    auc = 0.0
+    if len(classes) == 2:
+        y_prob = model.predict_proba(X_test)[:, 1]
+        try:
+            auc = float(roc_auc_score(y_test, y_prob))
+        except Exception:
+            auc = 0.0
+
+    coefs = model.coef_[0]
+    import math
+    coef_rows = []
+    for feat, coef in zip(x_cols, coefs):
+        coef_rows.append({
+            "Feature": feat,
+            "Coefficient": float(coef),
+            "OddsRatio": float(math.exp(coef)),
+        })
+    coef_df = pd.DataFrame(coef_rows).sort_values("Coefficient", key=abs, ascending=False)
+
+    result = AnalysisResult(
+        mode="logistic",
+        target_y=target_y,
+        x_columns=x_cols,
+        valid_row_count=len(df),
+        raw_row_count=len(df),
+        logistic_coef_df=coef_df,
+        logistic_accuracy=accuracy,
+        logistic_auc=auc,
+        logistic_classes=classes,
+    )
+
+    lines = [
+        f"## 🎯 逻辑回归分析",
+        f"**目标变量**：`{target_y}`（{'二元' if len(classes)==2 else str(len(classes))+'类'}分类）",
+        f"**有效样本**：{len(df)} 行  **测试集准确率**：{accuracy:.1%}",
+    ]
+    if auc > 0:
+        lines.append(f"**AUC-ROC**：{auc:.4f}（{'优秀' if auc>0.9 else '良好' if auc>0.7 else '一般'}）")
+    result.summary_text = "\n".join(lines)
+    return result
+
+
+# ──────────────────────────────────────────────────────────
+# 模式8：K-Means 聚类分析
+# ──────────────────────────────────────────────────────────
+
+def analyze_cluster(df: pd.DataFrame, columns: list[str], n_clusters: int = 0) -> AnalysisResult:
+    """
+    K-Means 聚类：肘部法则自动选 K + 簇统计
+    n_clusters：0 = 自动（肘部法则，测试 k=2..min(8, n//10)）
+    """
+    from sklearn.cluster import KMeans
+    from sklearn.preprocessing import StandardScaler
+
+    X = df[columns].dropna()
+    n = len(X)
+
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+
+    # 肘部法则
+    k_max = min(8, n // 10, len(columns) * 2)
+    k_max = max(k_max, 3)
+    inertia_list = []
+    for k in range(2, k_max + 1):
+        km = KMeans(n_clusters=k, random_state=42, n_init=10)
+        km.fit(X_scaled)
+        inertia_list.append(float(km.inertia_))
+
+    # 自动选 K：肘部点（最大曲率变化）
+    if n_clusters <= 0:
+        if len(inertia_list) >= 2:
+            diffs = [inertia_list[i] - inertia_list[i+1] for i in range(len(inertia_list)-1)]
+            diffs2 = [diffs[i] - diffs[i+1] for i in range(len(diffs)-1)]
+            best_idx = int(np.argmax(diffs2)) + 2 if diffs2 else 0
+            n_clusters = best_idx + 2
+        else:
+            n_clusters = 3
+
+    n_clusters = min(n_clusters, k_max)
+
+    # 最终拟合
+    km_final = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+    labels = km_final.fit_predict(X_scaled)
+    centers_scaled = km_final.cluster_centers_
+    centers_orig = scaler.inverse_transform(centers_scaled)
+    centers_df = pd.DataFrame(centers_orig, columns=columns)
+    centers_df.index.name = "Cluster"
+
+    # 各簇统计
+    X_copy = X.copy()
+    X_copy["_cluster"] = labels
+    stats_rows = []
+    for k in range(n_clusters):
+        grp = X_copy[X_copy["_cluster"] == k]
+        row = {"簇": f"Cluster {k}", "样本量": len(grp)}
+        for col in columns:
+            row[f"{col}_均值"] = round(float(grp[col].mean()), 4)
+        stats_rows.append(row)
+    stats_df = pd.DataFrame(stats_rows)
+
+    result = AnalysisResult(
+        mode="cluster",
+        target_y="",
+        x_columns=columns,
+        valid_row_count=n,
+        raw_row_count=len(df),
+        cluster_n=n_clusters,
+        cluster_inertia_list=inertia_list,
+        cluster_labels=pd.Series(labels),
+        cluster_centers_df=centers_df,
+        cluster_stats_df=stats_df,
+    )
+
+    lines = [
+        f"## 🔵 K-Means 聚类分析",
+        f"**聚类变量**：{len(columns)} 个  **自动选定 K**：{n_clusters} 簇  **有效样本**：{n} 行",
+        f"",
+        f"### 各簇大小",
+    ]
+    for row in stats_rows:
+        lines.append(f"- **{row['簇']}**：{row['样本量']} 个样本")
+    result.summary_text = "\n".join(lines)
+    return result
+
+
+# ──────────────────────────────────────────────────────────
+# 模式9：MLP 神经网络回归
+# ──────────────────────────────────────────────────────────
+
+def analyze_neural_reg(df: pd.DataFrame, target_y: str, x_cols: list[str]) -> AnalysisResult:
+    """
+    MLP 神经网络回归 + 与线性回归对比
+    使用 sklearn MLPRegressor，默认两层隐藏层
+    """
+    from sklearn.neural_network import MLPRegressor
+    from sklearn.model_selection import train_test_split
+    from sklearn.preprocessing import StandardScaler
+    from sklearn.metrics import r2_score, mean_absolute_error
+
+    X = df[x_cols].values
+    y = df[target_y].values
+    n = len(y)
+
+    scaler_x = StandardScaler()
+    X_scaled = scaler_x.fit_transform(X)
+
+    X_train, X_test, y_train, y_test = train_test_split(X_scaled, y, test_size=0.2, random_state=42)
+
+    # 根据样本量决定网络规模
+    h1 = min(64, max(8, len(x_cols) * 4))
+    h2 = h1 // 2
+    hidden_layers = (h1, h2)
+
+    mlp = MLPRegressor(hidden_layer_sizes=hidden_layers, max_iter=500, random_state=42, early_stopping=True)
+    mlp.fit(X_train, y_train)
+
+    y_pred_train = mlp.predict(X_train)
+    y_pred_test = mlp.predict(X_test)
+
+    r2_train = float(r2_score(y_train, y_pred_train))
+    r2_test = float(r2_score(y_test, y_pred_test))
+    mae_test = float(mean_absolute_error(y_test, y_pred_test))
+
+    # 线性回归对比基准
+    lr = LinearRegression()
+    lr.fit(X_train, y_train)
+    lr_r2 = float(r2_score(y_test, lr.predict(X_test)))
+
+    result = AnalysisResult(
+        mode="neural_reg",
+        target_y=target_y,
+        x_columns=x_cols,
+        valid_row_count=n,
+        raw_row_count=n,
+        neural_r2_train=r2_train,
+        neural_r2_test=r2_test,
+        neural_mae_test=mae_test,
+        neural_vs_linear_r2=lr_r2,
+        neural_hidden_layers=hidden_layers,
+    )
+
+    improvement = r2_test - lr_r2
+    lines = [
+        f"## 🧠 神经网络回归（MLP）",
+        f"**目标变量**：`{target_y}`  **输入特征**：{len(x_cols)} 个  **有效样本**：{n} 行",
+        f"**网络结构**：{len(x_cols)} → {h1} → {h2} → 1",
+        f"",
+        f"### 模型性能",
+        f"| 指标 | MLP 神经网络 | 线性回归基准 |",
+        f"|------|------------|------------|",
+        f"| R²（测试集） | **{r2_test:.4f}** | {lr_r2:.4f} |",
+        f"| 训练集 R² | {r2_train:.4f} | — |",
+        f"| MAE（测试集） | {mae_test:.4f} | — |",
+        f"",
+        f"### 📌 结论",
+        f"- MLP 相比线性回归 R² {'提升' if improvement > 0 else '下降'} {abs(improvement):.4f}",
+    ]
+    if improvement > 0.05:
+        lines.append("- ✅ 数据存在**非线性关系**，神经网络显著优于线性模型")
+    elif improvement < -0.02:
+        lines.append("- ⚠️ 线性回归表现更好，可能存在过拟合，建议增加数据量")
+    else:
+        lines.append("- 两模型表现相近，数据关系以线性为主")
+
+    result.summary_text = "\n".join(lines)
+    return result
+
+
+# ──────────────────────────────────────────────────────────
+# 模式10：岭回归 + 套索回归
+# ──────────────────────────────────────────────────────────
+
+def analyze_ridge_lasso(df: pd.DataFrame, target_y: str, x_cols: list[str],
+                         reg_type: str = "both") -> AnalysisResult:
+    """
+    岭回归（Ridge）和套索回归（Lasso）：解决多重共线性，自动交叉验证选最优 alpha
+    reg_type: "ridge" / "lasso" / "both"（默认）
+    """
+    from sklearn.linear_model import RidgeCV, LassoCV
+    from sklearn.preprocessing import StandardScaler
+    from sklearn.metrics import r2_score
+
+    X = df[x_cols].values
+    y = df[target_y].values
+
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+
+    alphas = [0.001, 0.01, 0.1, 1.0, 10.0, 100.0]
+
+    ridge_coefs = np.zeros(len(x_cols))
+    lasso_coefs = np.zeros(len(x_cols))
+    ridge_r2 = 0.0
+    lasso_r2 = 0.0
+    ridge_alpha = 0.0
+    lasso_alpha = 0.0
+    lasso_selected = []
+
+    if reg_type in ("ridge", "both"):
+        ridge = RidgeCV(alphas=alphas, cv=5)
+        ridge.fit(X_scaled, y)
+        ridge_coefs = ridge.coef_
+        ridge_r2 = float(r2_score(y, ridge.predict(X_scaled)))
+        ridge_alpha = float(ridge.alpha_)
+
+    if reg_type in ("lasso", "both"):
+        lasso = LassoCV(alphas=alphas, cv=5, max_iter=5000)
+        lasso.fit(X_scaled, y)
+        lasso_coefs = lasso.coef_
+        lasso_r2 = float(r2_score(y, lasso.predict(X_scaled)))
+        lasso_alpha = float(lasso.alpha_)
+        lasso_selected = [x_cols[i] for i, c in enumerate(lasso_coefs) if abs(c) > 1e-6]
+
+    # OLS 基准
+    lr = LinearRegression()
+    lr.fit(X_scaled, y)
+    ols_coefs = lr.coef_
+
+    coef_rows = []
+    for i, feat in enumerate(x_cols):
+        coef_rows.append({
+            "Feature": feat,
+            "OLS_Coef": float(ols_coefs[i]),
+            "Ridge_Coef": float(ridge_coefs[i]),
+            "Lasso_Coef": float(lasso_coefs[i]),
+        })
+    coef_df = pd.DataFrame(coef_rows)
+
+    result = AnalysisResult(
+        mode="ridge_lasso",
+        target_y=target_y,
+        x_columns=x_cols,
+        valid_row_count=len(df),
+        raw_row_count=len(df),
+        ridge_lasso_type=reg_type,
+        ridge_best_alpha=ridge_alpha,
+        lasso_best_alpha=lasso_alpha,
+        ridge_coef_df=coef_df,
+        ridge_r2=ridge_r2,
+        lasso_r2=lasso_r2,
+        lasso_selected_features=lasso_selected,
+    )
+
+    lines = [
+        f"## 🔧 岭回归 + 套索回归",
+        f"**目标变量**：`{target_y}`  **自变量**：{len(x_cols)} 个  **有效样本**：{len(df)} 行",
+        f"",
+        f"### 模型对比",
+        f"| 模型 | 最优 α | R²（训练集） |",
+        f"|------|-------|------------|",
+        f"| 岭回归（Ridge） | {ridge_alpha:.4g} | {ridge_r2:.4f} |",
+        f"| 套索回归（Lasso） | {lasso_alpha:.4g} | {lasso_r2:.4f} |",
+        f"",
+        f"### Lasso 变量选择",
+        f"保留 **{len(lasso_selected)}** 个非零系数特征：{', '.join(f'`{c}`' for c in lasso_selected) if lasso_selected else '无（所有系数被压缩至0）'}",
+    ]
+    result.summary_text = "\n".join(lines)
+    return result
+
+
+# ──────────────────────────────────────────────────────────
+# 辅助：变量类型检测
+# ──────────────────────────────────────────────────────────
+
+def _detect_feature_types(df: pd.DataFrame, columns: list[str]) -> dict[str, str]:
+    """
+    自动检测每列的变量类型。
+    规则：
+    - object / category dtype → categorical
+    - 整数列且唯一值 ≤ min(10, n*0.05) → categorical（视为分组编码）
+    - 其余 → continuous
+    """
+    n = len(df)
+    types = {}
+    for col in columns:
+        if df[col].dtype == object or str(df[col].dtype) == "category":
+            types[col] = "categorical"
+        elif df[col].dtype in (int, "int64", "int32") and df[col].nunique() <= min(10, max(3, n * 0.05)):
+            types[col] = "categorical"
+        else:
+            types[col] = "continuous"
+    return types
+
+
+# ──────────────────────────────────────────────────────────
+# 模式11：多模型对比（Model Comparison / AutoML-lite）
+# ──────────────────────────────────────────────────────────
+
+def analyze_model_comparison(
+    df: pd.DataFrame,
+    target_y: str,
+    x_cols: list[str],
+    top_n: int = 5,
+) -> AnalysisResult:
+    """
+    多模型赛马：对 top_n 个 X 列自动训练 5 个回归模型，5 折 CV 评估，
+    找出最优模型，并为每个模型保存预测值 vs 实际值数据（供报告绘图）。
+    """
+    from sklearn.linear_model import LinearRegression, RidgeCV
+    from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
+    from sklearn.neural_network import MLPRegressor
+    from sklearn.model_selection import cross_val_score, KFold
+    from sklearn.preprocessing import StandardScaler, LabelEncoder
+    from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
+    import warnings
+
+    # ── 变量类型检测 ──
+    feature_types = _detect_feature_types(df, x_cols)
+
+    # ── 预处理：分类列标签编码，连续列保留 ──
+    X_raw = df[x_cols].copy()
+    for col, ftype in feature_types.items():
+        if ftype == "categorical":
+            le = LabelEncoder()
+            X_raw[col] = le.fit_transform(X_raw[col].astype(str))
+    X = X_raw.values.astype(float)
+    y = df[target_y].values.astype(float)
+    n = len(y)
+
+    # ── 标准化（对线性/岭/神经网络有效，RF/GBR 无影响） ──
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+
+    # ── 候选模型定义 ──
+    models = {
+        "线性回归":    LinearRegression(),
+        "岭回归":      RidgeCV(alphas=[0.01, 0.1, 1.0, 10.0]),
+        "随机森林":    RandomForestRegressor(n_estimators=100, random_state=RF_RANDOM_STATE, n_jobs=1),
+        "梯度提升":    GradientBoostingRegressor(n_estimators=100, random_state=RF_RANDOM_STATE),
+        "神经网络MLP": MLPRegressor(
+            hidden_layer_sizes=(min(64, len(x_cols)*8), min(32, len(x_cols)*4)),
+            max_iter=500, random_state=RF_RANDOM_STATE, early_stopping=True
+        ),
+    }
+
+    kf = KFold(n_splits=min(5, n // 5), shuffle=True, random_state=42)
+
+    comparison_rows = []
+    predictions_store = {}
+    cv_scores_store = {}
+
+    for model_name, model in models.items():
+        use_scaled = model_name in ("线性回归", "岭回归", "神经网络MLP")
+        X_use = X_scaled if use_scaled else X
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            cv_r2 = cross_val_score(model, X_use, y, cv=kf, scoring="r2")
+            model.fit(X_use, y)
+
+        y_pred = model.predict(X_use)
+        r2 = float(r2_score(y, y_pred))
+        rmse = float(np.sqrt(mean_squared_error(y, y_pred)))
+        mae = float(mean_absolute_error(y, y_pred))
+        cv_mean = float(np.mean(cv_r2))
+        cv_std = float(np.std(cv_r2))
+
+        comparison_rows.append({
+            "模型":      model_name,
+            "训练集R²":  round(r2, 4),
+            "CV均值R²":  round(cv_mean, 4),
+            "CV标准差":  round(cv_std, 4),
+            "RMSE":      round(rmse, 4),
+            "MAE":       round(mae, 4),
+        })
+
+        residuals = y - y_pred
+        predictions_store[model_name] = {
+            "actual":    y.tolist(),
+            "predicted": y_pred.tolist(),
+            "residual":  residuals.tolist(),
+        }
+        cv_scores_store[model_name] = cv_r2.tolist()
+
+    comparison_df = pd.DataFrame(comparison_rows).sort_values("CV均值R²", ascending=False)
+    best_row = comparison_df.iloc[0]
+    best_name = str(best_row["模型"])
+    best_r2 = float(best_row["CV均值R²"])
+
+    result = AnalysisResult(
+        mode="model_comparison",
+        target_y=target_y,
+        x_columns=x_cols,
+        valid_row_count=n,
+        raw_row_count=n,
+        mc_x_columns=x_cols,
+        mc_comparison_df=comparison_df,
+        mc_best_model_name=best_name,
+        mc_best_model_r2=best_r2,
+        mc_predictions=predictions_store,
+        mc_feature_types=feature_types,
+        mc_cv_scores=cv_scores_store,
+    )
+
+    medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣"]
+    lines = [
+        f"## 多模型对比分析（AutoML-lite）",
+        f"**目标变量**：`{target_y}`  **输入特征**：{', '.join(f'`{c}`' for c in x_cols)}",
+        f"**有效样本**：{n} 行  **评估方式**：{min(5, n//5)} 折交叉验证",
+        f"",
+        f"### 最优模型：{best_name}",
+        f"- 交叉验证 R² = **{best_r2:.4f}**（越高越好）",
+        f"",
+        f"### 模型对比排名",
+        f"| 排名 | 模型 | CV R² | CV σ | RMSE | MAE |",
+        f"|------|------|-------|------|------|-----|",
+    ]
+    for i, (_, row) in enumerate(comparison_df.iterrows()):
+        medal = medals[i] if i < len(medals) else str(i+1)
+        lines.append(
+            f"| {medal} | **{row['模型']}** | {row['CV均值R²']:.4f} | "
+            f"±{row['CV标准差']:.4f} | {row['RMSE']:.4f} | {row['MAE']:.4f} |"
+        )
+    lines.append(f"")
+    lines.append(f"> Excel 报告中每个模型均有独立 Sheet，包含预测值 vs 实际值散点图与残差图。")
+    result.summary_text = "\n".join(lines)
+    return result

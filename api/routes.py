@@ -14,7 +14,7 @@ from pydantic import BaseModel
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from utils.data_loader import load_excel, get_numeric_columns, preprocess_for_analysis
 from utils.file_manager import get_output_path, cleanup_old_reports
-from core.analysis_engine import analyze_y_vs_all, analyze_two_column, analyze_multi_x_vs_y
+from core.analysis_engine import analyze_y_vs_all, analyze_two_column, analyze_multi_x_vs_y, analyze_model_comparison
 from core.report_builder import build_report
 from core.result_formatter import format_result
 from config import OUTPUTS_DIR
@@ -136,7 +136,7 @@ class AnalyzeRequest(BaseModel):
     file_id: str
     instruction: str = ""
     use_ai: bool = True
-    manual_mode: str = "y_vs_all"
+    manual_mode: str = "y_vs_all"  # y_vs_all/two_column/multi_x_vs_y/time_series/pca/anova/logistic/cluster/neural_reg/ridge_lasso
     manual_y: Optional[str] = None
     manual_x_cols: list[str] = []
 
@@ -172,6 +172,31 @@ def _build_table_data(analysis) -> list[dict]:
                 "系数": f"{r['Coefficient']:.4f}",
                 "P值": f"{r['p_value']:.4f}" if r['p_value'] == r['p_value'] else "N/A",
                 "显著性": r.get("Significant", ""),
+            })
+    elif analysis.mode == "pca" and analysis.pca_loadings_df is not None:
+        for i, (pc, ratio) in enumerate(zip(
+            [f"PC{j+1}" for j in range(analysis.pca_n_components)],
+            analysis.pca_explained_ratio
+        )):
+            rows.append({"主成分": pc, "方差贡献率": f"{ratio:.1%}", "累计贡献率": f"{analysis.pca_cumulative_ratio[i]:.1%}"})
+    elif analysis.mode == "anova" and analysis.anova_group_stats_df is not None:
+        for _, r in analysis.anova_group_stats_df.iterrows():
+            rows.append({"组别": str(r["组别"]), "样本量": r["样本量"], "均值": r["均值"]})
+    elif analysis.mode == "logistic" and analysis.logistic_coef_df is not None:
+        for _, r in analysis.logistic_coef_df.iterrows():
+            rows.append({"特征": r["Feature"], "系数": f"{r['Coefficient']:+.4f}", "Odds Ratio": f"{r['OddsRatio']:.4f}"})
+    elif analysis.mode == "cluster" and analysis.cluster_stats_df is not None:
+        for _, r in analysis.cluster_stats_df.iterrows():
+            rows.append(dict(r))
+    elif analysis.mode in ("neural_reg", "ridge_lasso", "time_series"):
+        pass  # summary_text 已包含核心数据
+    elif analysis.mode == "model_comparison" and analysis.mc_comparison_df is not None:
+        for _, r in analysis.mc_comparison_df.iterrows():
+            rows.append({
+                "模型": r["模型"],
+                "CV均值R²": f"{r['CV均值R²']:.4f}",
+                "RMSE": f"{r['RMSE']:.4f}",
+                "MAE": f"{r['MAE']:.4f}",
             })
     return rows
 
@@ -211,6 +236,37 @@ async def api_analyze(req: AnalyzeRequest):
             if mode == "y_vs_all" and any(k in inst_lower for k in _multi_kw):
                 mode = "multi_x_vs_y"
                 # x_cols 留空，后续自动填充除 Y 外所有列
+                x_cols = []
+
+            _ts_kw = ["时间趋势", "时序", "走势", "预测未来", "季节", "arima", "trend"]
+            if mode == "y_vs_all" and any(k in inst_lower for k in _ts_kw):
+                mode = "time_series"
+
+            _pca_kw = ["pca", "降维", "主成分", "factor"]
+            if mode == "y_vs_all" and any(k in inst_lower for k in _pca_kw):
+                mode = "pca"
+                x_cols = []  # 自动取所有数值列
+
+            _anova_kw = ["方差分析", "anova", "组间", "各组差异", "组别比较"]
+            if mode == "y_vs_all" and any(k in inst_lower for k in _anova_kw):
+                mode = "anova"
+
+            _cluster_kw = ["聚类", "k-means", "kmeans", "分群", "分组发现"]
+            if mode == "y_vs_all" and any(k in inst_lower for k in _cluster_kw):
+                mode = "cluster"
+                x_cols = []
+
+            _neural_kw = ["神经网络", "mlp", "深度学习", "neural", "非线性回归"]
+            if mode == "y_vs_all" and any(k in inst_lower for k in _neural_kw):
+                mode = "neural_reg"
+
+            _ridge_kw = ["岭回归", "套索", "lasso", "ridge", "正则化"]
+            if mode == "y_vs_all" and any(k in inst_lower for k in _ridge_kw):
+                mode = "ridge_lasso"
+
+            _mc_kw = ["模型对比", "model comparison", "automl", "多模型", "哪个模型最好", "最优模型", "对比模型"]
+            if any(k in inst_lower for k in _mc_kw):
+                mode = "model_comparison"
                 x_cols = []
 
             intent_info = {
@@ -257,11 +313,62 @@ async def api_analyze(req: AnalyzeRequest):
             analysis = analyze_y_vs_all(clean_df, target_y)
         elif mode == "two_column":
             analysis = analyze_two_column(clean_df, x_cols[0], target_y)
-        else:
+        elif mode == "multi_x_vs_y":
             valid_x = [c for c in x_cols if c in clean_df.columns]
             if not valid_x:
                 return JSONResponse({"success": False, "error": "所有自变量列在清洗后均不存在"})
             analysis = analyze_multi_x_vs_y(clean_df, target_y, valid_x)
+        elif mode == "time_series":
+            time_c = x_cols[0] if x_cols else None
+            if not time_c:
+                return JSONResponse({"success": False, "error": "时序分析需要指定时间列（x_columns）"})
+            from core.analysis_engine import analyze_time_series
+            analysis = analyze_time_series(clean_df, time_c, target_y)
+        elif mode == "pca":
+            cols_for_pca = x_cols if x_cols else [c for c in numeric_cols if c != target_y]
+            if len(cols_for_pca) < 2:
+                return JSONResponse({"success": False, "error": "PCA 至少需要 2 个变量"})
+            from core.analysis_engine import analyze_pca
+            analysis = analyze_pca(clean_df, cols_for_pca)
+        elif mode == "anova":
+            group_c = x_cols[0] if x_cols else None
+            if not group_c:
+                return JSONResponse({"success": False, "error": "ANOVA 需要指定分组列（x_columns）"})
+            from core.analysis_engine import analyze_anova
+            analysis = analyze_anova(clean_df, target_y, group_c)
+        elif mode == "logistic":
+            valid_x = [c for c in x_cols if c in clean_df.columns]
+            if not valid_x:
+                valid_x = [c for c in numeric_cols if c != target_y]
+            from core.analysis_engine import analyze_logistic
+            analysis = analyze_logistic(clean_df, target_y, valid_x)
+        elif mode == "cluster":
+            cols_for_cluster = x_cols if x_cols else [c for c in numeric_cols if c != target_y]
+            if len(cols_for_cluster) < 2:
+                return JSONResponse({"success": False, "error": "聚类至少需要 2 个变量"})
+            from core.analysis_engine import analyze_cluster
+            analysis = analyze_cluster(clean_df, cols_for_cluster)
+        elif mode == "neural_reg":
+            valid_x = [c for c in x_cols if c in clean_df.columns]
+            if not valid_x:
+                valid_x = [c for c in numeric_cols if c != target_y]
+            from core.analysis_engine import analyze_neural_reg
+            analysis = analyze_neural_reg(clean_df, target_y, valid_x)
+        elif mode == "ridge_lasso":
+            valid_x = [c for c in x_cols if c in clean_df.columns]
+            if not valid_x:
+                valid_x = [c for c in numeric_cols if c != target_y]
+            from core.analysis_engine import analyze_ridge_lasso
+            analysis = analyze_ridge_lasso(clean_df, target_y, valid_x)
+        elif mode == "model_comparison":
+            valid_x = [c for c in x_cols if c in clean_df.columns]
+            if not valid_x:
+                valid_x = [c for c in numeric_cols if c != target_y]
+            if len(valid_x) < 1:
+                return JSONResponse({"success": False, "error": "模型对比至少需要 1 个自变量"})
+            analysis = analyze_model_comparison(clean_df, target_y, valid_x)
+        else:
+            return JSONResponse({"success": False, "error": f"未知分析模式：{mode}"})
         analysis.raw_row_count = raw_count
         analysis.valid_row_count = valid_count
     except Exception as e:

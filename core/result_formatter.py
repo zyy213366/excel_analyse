@@ -54,6 +54,25 @@ def detect_focus(instruction: str, mode: str) -> str:
         # 默认 multi_x_vs_y 走综合输出
         return "default"
 
+    elif mode == "time_series":
+        return "default"
+
+    elif mode == "pca":
+        return "default"
+
+    elif mode == "anova":
+        if any(k in inst for k in ["tukey", "事后检验", "两两比较", "post-hoc"]):
+            return "tukey_detail"
+        return "default"
+
+    elif mode in ("logistic", "cluster", "neural_reg", "ridge_lasso"):
+        return "default"
+
+    elif mode == "model_comparison":
+        if any(k in inst for k in ["最优", "best", "最佳", "推荐"]):
+            return "best_only"
+        return "default"
+
     return "default"
 
 
@@ -87,6 +106,32 @@ def format_result(analysis: "AnalysisResult", instruction: str) -> str:
             "coef_table":     _fmt_coef_table,
             "regression_eq":  _fmt_multi_regression,
             "default":        lambda a: a.summary_text,
+        },
+        "time_series": {
+            "default": _fmt_time_series,
+        },
+        "pca": {
+            "default": _fmt_pca,
+        },
+        "anova": {
+            "tukey_detail": _fmt_anova_tukey,
+            "default":      _fmt_anova,
+        },
+        "logistic": {
+            "default": _fmt_logistic,
+        },
+        "cluster": {
+            "default": _fmt_cluster,
+        },
+        "neural_reg": {
+            "default": _fmt_neural_reg,
+        },
+        "ridge_lasso": {
+            "default": _fmt_ridge_lasso,
+        },
+        "model_comparison": {
+            "best_only": _fmt_mc_best_only,
+            "default":   _fmt_model_comparison,
         },
     }
 
@@ -714,3 +759,145 @@ def _fmt_multi_regression(a: "AnalysisResult") -> str:
         lines += ["", "### ⚠️ 共线性警告"] + [f"- {w}" for w in a.collinearity_warnings]
 
     return "\n".join(lines)
+
+
+# ──────────────────────────────────────────────────────────
+# 新模式格式化器
+# ──────────────────────────────────────────────────────────
+
+def _fmt_time_series(a: "AnalysisResult") -> str:
+    """时间序列分析结果格式化"""
+    return a.summary_text  # summary_text 已在 analyze_time_series 中构建完整
+
+
+def _fmt_pca(a: "AnalysisResult") -> str:
+    """PCA 分析结果格式化"""
+    return a.summary_text
+
+
+def _fmt_anova(a: "AnalysisResult") -> str:
+    """ANOVA 完整结果（含分组统计）"""
+    if a.anova_group_stats_df is None:
+        return a.summary_text
+    lines = [a.summary_text, "", "### 各组描述统计"]
+    if a.anova_group_stats_df is not None:
+        cols = a.anova_group_stats_df.columns.tolist()
+        lines.append("| " + " | ".join(cols) + " |")
+        lines.append("|" + "------|" * len(cols))
+        for _, row in a.anova_group_stats_df.iterrows():
+            lines.append("| " + " | ".join(str(v) for v in row) + " |")
+    return "\n".join(lines)
+
+
+def _fmt_anova_tukey(a: "AnalysisResult") -> str:
+    """ANOVA + Tukey HSD 事后检验细节"""
+    base = _fmt_anova(a)
+    if a.anova_tukey_df is None:
+        return base + "\n\n> Tukey HSD 不可用（statsmodels 未安装）"
+    lines = [base, "", "### Tukey HSD 两两比较（p<0.05 = 显著差异）"]
+    cols = a.anova_tukey_df.columns.tolist()
+    lines.append("| " + " | ".join(str(c) for c in cols) + " |")
+    lines.append("|" + "------|" * len(cols))
+    for _, row in a.anova_tukey_df.iterrows():
+        lines.append("| " + " | ".join(str(v) for v in row) + " |")
+    return "\n".join(lines)
+
+
+def _fmt_logistic(a: "AnalysisResult") -> str:
+    """逻辑回归结果格式化"""
+    if a.logistic_coef_df is None:
+        return a.summary_text
+    lines = [
+        a.summary_text, "",
+        "### 回归系数与 Odds Ratio",
+        "| 特征 | 系数 | Odds Ratio | 影响方向 |",
+        "|------|------|-----------|---------|",
+    ]
+    for _, row in a.logistic_coef_df.iterrows():
+        d = "上升正类概率" if row["Coefficient"] > 0 else "降低正类概率"
+        lines.append(f"| `{row['Feature']}` | {row['Coefficient']:+.4f} | {row['OddsRatio']:.4f} | {d} |")
+    return "\n".join(lines)
+
+
+def _fmt_cluster(a: "AnalysisResult") -> str:
+    """聚类分析结果格式化"""
+    if a.cluster_stats_df is None:
+        return a.summary_text
+    lines = [a.summary_text, "", "### 各簇统计（均值）"]
+    cols = a.cluster_stats_df.columns.tolist()
+    lines.append("| " + " | ".join(cols) + " |")
+    lines.append("|" + "------|" * len(cols))
+    for _, row in a.cluster_stats_df.iterrows():
+        lines.append("| " + " | ".join(str(v) for v in row) + " |")
+    return "\n".join(lines)
+
+
+def _fmt_neural_reg(a: "AnalysisResult") -> str:
+    """神经网络回归结果格式化"""
+    return a.summary_text
+
+
+def _fmt_ridge_lasso(a: "AnalysisResult") -> str:
+    """岭/套索回归系数对比表格"""
+    if a.ridge_coef_df is None:
+        return a.summary_text
+    lines = [
+        a.summary_text, "",
+        "### 系数对比（OLS vs Ridge vs Lasso）",
+        "| 特征 | OLS 系数 | Ridge 系数 | Lasso 系数 |",
+        "|------|---------|-----------|----------|",
+    ]
+    for _, row in a.ridge_coef_df.iterrows():
+        lasso_val = f"{row['Lasso_Coef']:+.4f}" if abs(row["Lasso_Coef"]) > 1e-6 else "**0（压缩）**"
+        lines.append(f"| `{row['Feature']}` | {row['OLS_Coef']:+.4f} | {row['Ridge_Coef']:+.4f} | {lasso_val} |")
+    return "\n".join(lines)
+
+
+def _fmt_model_comparison(a: "AnalysisResult") -> str:
+    """模型对比完整输出"""
+    if a.summary_text:
+        return a.summary_text
+    df = a.mc_comparison_df
+    if df is None or df.empty:
+        return "模型对比数据为空。"
+    lines = [
+        f"## 多模型对比分析 — {a.target_y}",
+        "",
+        f"**特征变量**：{', '.join(a.mc_x_columns)}",
+        f"**样本量**：{a.valid_row_count} 行（5折交叉验证）",
+        "",
+        "| 模型 | CV均值R² | CV标准差 | 训练集R² | RMSE | MAE |",
+        "|------|---------|---------|---------|------|-----|",
+    ]
+    for _, row in df.iterrows():
+        flag = " 🏆" if row["模型"] == a.mc_best_model_name else ""
+        lines.append(
+            f"| {row['模型']}{flag} | {row['CV均值R²']:.4f} | "
+            f"{row['CV标准差']:.4f} | {row['训练集R²']:.4f} | "
+            f"{row['RMSE']:.4f} | {row['MAE']:.4f} |"
+        )
+    lines += [
+        "",
+        f"**最优模型**：{a.mc_best_model_name}（CV R² = {a.mc_best_model_r2:.4f}）",
+        "",
+        "> 完整预测值与残差图表已写入 Excel 报告各模型 Sheet。",
+    ]
+    return "\n".join(lines)
+
+
+def _fmt_mc_best_only(a: "AnalysisResult") -> str:
+    """只输出最优模型摘要"""
+    df = a.mc_comparison_df
+    if df is None or df.empty:
+        return "模型对比数据为空。"
+    row = df.iloc[0]
+    return (
+        f"## 最优模型推荐\n\n"
+        f"**{a.mc_best_model_name}** 在 {a.target_y} 的预测任务上表现最佳：\n\n"
+        f"- CV 均值 R²：**{row['CV均值R²']:.4f}**\n"
+        f"- CV 标准差：{row['CV标准差']:.4f}\n"
+        f"- 训练集 R²：{row['训练集R²']:.4f}\n"
+        f"- RMSE：{row['RMSE']:.4f}\n"
+        f"- MAE：{row['MAE']:.4f}\n\n"
+        f"> 共对比了 {len(df)} 个模型，详见 Excel 报告。"
+    )
