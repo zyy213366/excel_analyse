@@ -1,6 +1,7 @@
 """
 FastAPI 路由 — 页面路由 + REST API
 """
+import re
 import uuid
 import sys
 from pathlib import Path
@@ -147,6 +148,21 @@ class AnalyzeRequest(BaseModel):
     manual_x_cols: list[str] = []
 
 
+_CN_NUM = {
+    "一": 1, "两": 2, "二": 2, "三": 3, "四": 4, "五": 5,
+    "六": 6, "七": 7, "八": 8, "九": 9, "十": 10,
+    "十一": 11, "十二": 12, "十三": 13, "十四": 14, "十五": 15,
+}
+
+
+def _cn_num(s: str) -> int:
+    """中文或阿拉伯数字字符串 → int，解析失败返回 5"""
+    s = s.strip()
+    if s.isdigit():
+        return int(s)
+    return _CN_NUM.get(s, 5)
+
+
 def _extract_col(inst: str, all_cols: list) -> Optional[str]:
     """从指令文本中提取列名（优先最长匹配，大小写不敏感）"""
     cols_by_len = sorted(all_cols, key=len, reverse=True)
@@ -198,6 +214,29 @@ def _parse_process_instruction(inst: str, all_cols: list) -> Optional[dict]:
       calc_extremes 求极值（最大/最小/极差）
       split         按列拆分为多Sheet
     """
+    # ── 【最高优先级】分析意图豁免：含统计/建模词汇时直接交给 NLP 分析器 ──────
+    # 防止"找出影响Y的因素"被误判为数据查找，"建立模型"被误判为其他操作
+    _analysis_exempt_kw = [
+        # 统计分析
+        "影响因素", "影响y", "影响Y", "相关性", "相关分析",
+        "回归", "回归分析", "线性回归", "逻辑回归",
+        # 机器学习
+        "随机森林", "神经网络", "决策树", "支持向量", "梯度提升", "XGBoost", "LightGBM",
+        # 建模意图
+        "建立模型", "建模", "训练模型", "拟合", "预测模型",
+        "特征重要性", "特征选择", "变量筛选",
+        # 统计检验
+        "方差分析", "ANOVA", "anova", "假设检验", "显著性",
+        # 降维聚类
+        "主成分", "PCA", "pca", "聚类", "cluster",
+        # 时序
+        "时间序列", "时序分析", "趋势预测", "ARIMA",
+        # 多模型比较
+        "比较模型", "模型比较", "效果最好", "最优模型", "多个模型",
+    ]
+    if any(k in inst for k in _analysis_exempt_kw):
+        return None  # 交给 NLP 分析器 / AI 规划器处理
+
     # ── 数据清洗 ─────────────────────────────────────────────────────────
     # 关键词分组：只要命中其中任何一组，就确认是清洗操作
     _clean_kw = [
@@ -248,6 +287,18 @@ def _parse_process_instruction(inst: str, all_cols: list) -> Optional[dict]:
     if any(k in inst for k in _count_kw):
         return {"op": "count", "group_col": None, "condition": ""}
 
+    # ── 各列总和（全列聚合，优先于单列求和检测）────────────────────
+    _all_col_sum_kw = ["各列总和", "各列求和", "每列总和", "每列求和", "所有列求和",
+                       "全列总和", "全部列求和", "所有列的总和", "各列之和"]
+    if any(k in inst for k in _all_col_sum_kw):
+        return {"op": "calc_all_col_sum"}
+
+    # ── 各列均值（全列聚合）───────────────────────────────────────────
+    _all_col_mean_kw = ["各列均值", "各列平均", "每列均值", "每列平均", "所有列均值",
+                        "全列均值", "各列平均值"]
+    if any(k in inst for k in _all_col_mean_kw):
+        return {"op": "calc_all_col_mean"}
+
     # ── 求和 ─────────────────────────────────────────────────────────
     if any(k in inst for k in ["求和", "总和", "合计", "求总和", "加总"]):
         vc = _extract_col(inst, all_cols)
@@ -263,11 +314,88 @@ def _parse_process_instruction(inst: str, all_cols: list) -> Optional[dict]:
         vc = _extract_col(inst, all_cols)
         return {"op": "calc_extremes", "value_col": vc}
 
-    # ── 拆分（按列分Sheet）─────────────────────────────────────────
+    # ── 按列数拆分（每 N 列一组）优先于按值拆分 ─────────────────────
+    # 关键词匹配：覆盖"五列一组"、"按5列拆分"、"每N列"等各种表达
+    _col_count_split_kw = ["列一组", "列为一组", "列分组", "按列数", "每列拆", "列拆分为多"]
+    # 额外模式：指令同时含"N列"和拆分意图
+    _m_n_col = re.search(r"([一两二三四五六七八九十\d]+)列", inst)
+    _has_split_intent = any(k in inst for k in ["拆分", "分表", "多张表", "多sheet", "多Sheet"])
+    if any(k in inst for k in _col_count_split_kw) or (_m_n_col and _has_split_intent):
+        m_num = _m_n_col or re.search(r"([一两二三四五六七八九十\d]+)列", inst)
+        n = _cn_num(m_num.group(1)) if m_num else 5
+        return {"op": "split_col_count", "n": n}
+
+    # ── 拆分（按列值分Sheet）────────────────────────────────────────
     if any(k in inst for k in ["拆分", "分组导出", "按列拆分", "分sheet", "分Sheet", "按列分"]):
         sc = _extract_col(inst, all_cols)
         return {"op": "split", "split_col": sc}
 
+    return None
+
+
+def _build_chart_from_analysis(analysis) -> Optional[dict]:
+    """
+    根据分析结果生成适合前端渲染的 ECharts option。
+    各模式选择最有意义的图表类型。
+    """
+    try:
+        from core.chart_builder import build_chart as _bc
+
+        if analysis.mode == "y_vs_all" and analysis.feature_importance_df is not None:
+            df = analysis.feature_importance_df[["Feature", "Importance"]].head(10).copy()
+            df.columns = ["特征", "重要性"]
+            return _bc("bar", df, "特征", ["重要性"],
+                       title=f"全因子重要性排名 — {analysis.target_y}")
+
+        elif analysis.mode == "multi_x_vs_y" and analysis.feature_importance_df is not None:
+            df = analysis.feature_importance_df[["Feature", "Importance"]].head(10).copy()
+            df.columns = ["特征", "重要性"]
+            return _bc("bar", df, "特征", ["重要性"],
+                       title=f"特征重要性 — {analysis.target_y}")
+
+        elif analysis.mode == "compare" and analysis.compare_group_stats_df is not None:
+            gs = analysis.compare_group_stats_df[["组别", "均值"]].copy()
+            return _bc("bar", gs, "组别", ["均值"],
+                       title=f"{analysis.compare_value_col} 各组均值对比")
+
+        elif analysis.mode == "crosstab" and analysis.crosstab_df is not None:
+            # 将透视表转成 bar，取第一列数值
+            ct = analysis.crosstab_df.copy().reset_index()
+            num_cols = [c for c in ct.columns if ct[c].dtype.kind in "iuf" and c != ct.columns[0]]
+            if num_cols:
+                return _bc("bar", ct, ct.columns[0], num_cols[:4],
+                           title="交叉分析结果")
+
+        elif analysis.mode == "anova" and analysis.anova_group_stats_df is not None:
+            gs = analysis.anova_group_stats_df[["组别", "均值"]].copy()
+            return _bc("bar", gs, "组别", ["均值"],
+                       title=f"ANOVA — {analysis.target_y} 各组均值")
+
+        elif analysis.mode == "model_comparison" and analysis.mc_comparison_df is not None:
+            mc = analysis.mc_comparison_df[["模型", "CV均值R²"]].copy()
+            return _bc("bar", mc, "模型", ["CV均值R²"],
+                       title="多模型交叉验证 R² 对比")
+
+        elif analysis.mode == "pca" and analysis.pca_explained_ratio:
+            n = len(analysis.pca_explained_ratio)
+            df = pd.DataFrame({
+                "主成分": [f"PC{i+1}" for i in range(n)],
+                "方差贡献率": analysis.pca_explained_ratio,
+                "累计贡献率": analysis.pca_cumulative_ratio,
+            })
+            return _bc("bar", df, "主成分", ["方差贡献率"],
+                       title="PCA 方差贡献率")
+
+        elif analysis.mode == "cluster" and analysis.cluster_stats_df is not None:
+            cs = analysis.cluster_stats_df.copy()
+            num_cols = [c for c in cs.columns if cs[c].dtype.kind in "iuf"]
+            cat_cols = [c for c in cs.columns if c not in num_cols]
+            if cat_cols and num_cols:
+                return _bc("bar", cs, cat_cols[0], num_cols[:2],
+                           title="各簇统计分布")
+
+    except Exception:
+        pass
     return None
 
 
@@ -402,6 +530,51 @@ async def api_analyze(req: AnalyzeRequest):
                             "error": f"请指定拆分列，可用列：{list(df_raw.columns)[:10]}",
                         })
                     proc_result = ExcelProcessor.process_split(df_raw, sc)
+                elif op == "split_col_count":
+                    n = _proc_params.get("n", 5)
+                    proc_result = ExcelProcessor.split_by_col_count(df_raw, n)
+                elif op == "calc_all_col_sum":
+                    num_cols = df_raw.select_dtypes(include="number").columns.tolist()
+                    if not num_cols:
+                        return JSONResponse({
+                            "success": False,
+                            "error": "数据中未找到数值列，无法求和",
+                        })
+                    sums = df_raw[num_cols].sum()
+                    result_df = pd.DataFrame({"列名": sums.index, "总和": sums.values})
+                    from core.process_result import ProcessResult as _PR
+                    proc_result = _PR(
+                        operation="calc_all_col_sum",
+                        summary_text=(
+                            f"## ➕ 各列总和\n"
+                            + "\n".join(f"- `{c}`：**{v:,.4g}**"
+                                        for c, v in zip(sums.index, sums.values))
+                        ),
+                        result_df=result_df,
+                        raw_row_count=len(df_raw),
+                        valid_row_count=len(df_raw),
+                    )
+                elif op == "calc_all_col_mean":
+                    num_cols = df_raw.select_dtypes(include="number").columns.tolist()
+                    if not num_cols:
+                        return JSONResponse({
+                            "success": False,
+                            "error": "数据中未找到数值列，无法求均值",
+                        })
+                    means = df_raw[num_cols].mean()
+                    result_df = pd.DataFrame({"列名": means.index, "均值": means.values})
+                    from core.process_result import ProcessResult as _PR
+                    proc_result = _PR(
+                        operation="calc_all_col_mean",
+                        summary_text=(
+                            f"## 📊 各列均值\n"
+                            + "\n".join(f"- `{c}`：**{v:,.4g}**"
+                                        for c, v in zip(means.index, means.values))
+                        ),
+                        result_df=result_df,
+                        raw_row_count=len(df_raw),
+                        valid_row_count=len(df_raw),
+                    )
                 else:
                     proc_result = None
 
@@ -417,6 +590,10 @@ async def api_analyze(req: AnalyzeRequest):
                     table_rows: list = []
                     if proc_result.result_df is not None and not proc_result.result_df.empty:
                         table_rows = proc_result.result_df.head(100).to_dict("records")
+                    elif proc_result.result_sheets:
+                        # 多 Sheet 结果：取第一张表的前 100 行作内联预览
+                        first_sheet = next(iter(proc_result.result_sheets.values()))
+                        table_rows = first_sheet.head(100).to_dict("records")
                     return JSONResponse({
                         "success": True,
                         "summary_text": proc_result.summary_text,
@@ -434,191 +611,148 @@ async def api_analyze(req: AnalyzeRequest):
                     "error": f"处理失败：{str(e)}\n{_tb.format_exc()}",
                 })
 
+    # ── DS-first：AI 规划器作为唯一大脑 ──────────────────────────────────────
+    # 当用户有自然语言指令时，始终先让 DeepSeek 规划（包括分析类指令）。
+    # NLP Parser 仅作为 DS 不可用时的 fallback。
     if req.use_ai and req.instruction.strip():
+        ds_plan = None
+        ds_error = None
         try:
-            from core.nlp_parser import IntentParser
-            parser = IntentParser()
-            result = parser.parse(req.instruction, numeric_cols)
-            if result.get("error"):
-                return JSONResponse({"success": False, "error": result["error"]})
-            mode = result["analysis_mode"]
-            target_y = result["target_y"]
-            x_cols = result["x_columns"]
-            # 关键词覆盖：若 NLP 返回 y_vs_all 但指令明显是多因素回归，强制切换
-            inst_lower = req.instruction.lower()
-            _multi_kw = ["系数", "回归系数", "p值", "p-value", "多元", "多因素", "共线性", "多重共线", "特征重要性"]
-            if mode == "y_vs_all" and any(k in inst_lower for k in _multi_kw):
-                mode = "multi_x_vs_y"
-                # x_cols 留空，后续自动填充除 Y 外所有列
-                x_cols = []
-
-            _ts_kw = ["时间趋势", "时序", "走势", "预测未来", "季节", "arima", "trend"]
-            if mode == "y_vs_all" and any(k in inst_lower for k in _ts_kw):
-                mode = "time_series"
-
-            _pca_kw = ["pca", "降维", "主成分", "factor"]
-            if mode == "y_vs_all" and any(k in inst_lower for k in _pca_kw):
-                mode = "pca"
-                x_cols = []  # 自动取所有数值列
-
-            _anova_kw = ["方差分析", "anova", "组间", "各组差异", "组别比较"]
-            if mode == "y_vs_all" and any(k in inst_lower for k in _anova_kw):
-                mode = "anova"
-
-            _cluster_kw = ["聚类", "k-means", "kmeans", "分群", "分组发现"]
-            if mode == "y_vs_all" and any(k in inst_lower for k in _cluster_kw):
-                mode = "cluster"
-                x_cols = []
-
-            _neural_kw = ["神经网络", "mlp", "深度学习", "neural", "非线性回归"]
-            if mode == "y_vs_all" and any(k in inst_lower for k in _neural_kw):
-                mode = "neural_reg"
-
-            _ridge_kw = ["岭回归", "套索", "lasso", "ridge", "正则化"]
-            if mode == "y_vs_all" and any(k in inst_lower for k in _ridge_kw):
-                mode = "ridge_lasso"
-
-            _mc_kw = ["模型对比", "model comparison", "automl", "多模型", "哪个模型最好", "最优模型", "对比模型"]
-            if any(k in inst_lower for k in _mc_kw):
-                mode = "model_comparison"
-                x_cols = []
-
-            _compare_kw = ["对比分析", "比较各组", "组间对比", "分组比较", "各组差异", "t检验", "t-test"]
-            if mode == "y_vs_all" and any(k in inst_lower for k in _compare_kw):
-                mode = "compare"
-
-            _crosstab_kw = ["交叉分析", "透视表", "crosstab", "pivot", "交叉表", "行列分析"]
-            if any(k in inst_lower for k in _crosstab_kw):
-                mode = "crosstab"
-
-            intent_info = {
-                "mode": mode,
-                "target_y": target_y,
-                "x_cols": x_cols,
-                "hint": result.get("analysis_hint", ""),
-                "confidence": result.get("confidence", 0.5),
-            }
+            from core.ai_planner import AIPLanner
+            planner = AIPLanner()
+            ds_plan = planner.plan(df_raw, req.instruction.strip())
         except Exception as e:
-            return JSONResponse({"success": False, "error": f"AI 解析失败：{str(e)}"})
+            ds_error = str(e)
 
-    # 不需要 target_y 的模式：直接放行
-    _no_y_modes = {"pca", "cluster", "compare", "crosstab"}
-    if not target_y or target_y not in numeric_cols:
-        if mode == "multi_x_vs_y" and numeric_cols:
-            target_y = numeric_cols[0]
-        elif mode in _no_y_modes:
-            pass  # 这些模式不依赖 target_y，跳过校验
-        else:
-            return JSONResponse({"success": False, "error": f"目标变量 `{target_y}` 不存在，可用列：{numeric_cols[:5]}"})
+        if ds_plan:
+            from core.skill_executor import execute_plan
+            exec_result = execute_plan(df_raw, ds_plan)
 
-    # multi_x_vs_y 模式：若 X 列为空，自动使用除 Y 外所有数值列
-    if mode == "multi_x_vs_y" and not x_cols:
-        x_cols = [c for c in numeric_cols if c != target_y]
+            if not exec_result.success:
+                # DS 规划执行失败 → 降级到 NLP Parser
+                ds_error = exec_result.error
+            elif exec_result.analysis_result is not None:
+                # DS 调用了 run_analysis skill，走分析报告路径
+                analysis = exec_result.analysis_result
+                analysis.raw_row_count = len(df_raw)
+                analysis.valid_row_count = len(exec_result.df)
+                intent_info = {
+                    "mode": analysis.mode,
+                    "target_y": analysis.target_y,
+                    "x_cols": [],
+                    "hint": "DeepSeek 规划",
+                    "confidence": 1.0,
+                }
+                # 走统一分析输出路径（跳过 NLP 分支）
+                mode = analysis.mode
+                raw_count = analysis.raw_row_count
+                valid_count = analysis.valid_row_count
+                # fall-through 到下方报告生成逻辑
+            else:
+                # DS 只做了数据处理（无 analysis_result），直接返回
+                steps_summary = [s for s in exec_result.steps_summary if s]
+                # 多表结果（split_columns）
+                if exec_result.result_sheets:
+                    first_sheet = next(iter(exec_result.result_sheets.values()))
+                    table_rows = first_sheet.head(200).fillna("").to_dict("records")
+                elif not exec_result.df.empty:
+                    table_rows = exec_result.df.head(200).fillna("").to_dict("records")
+                else:
+                    table_rows = []
+                report_filename = None
+                try:
+                    from core.process_result import ProcessResult as _PR
+                    _pr = _PR(
+                        operation="ai_plan",
+                        summary_text=exec_result.full_summary,
+                        result_df=exec_result.df if not exec_result.result_sheets else None,
+                        result_sheets=exec_result.result_sheets,
+                        raw_row_count=len(df_raw),
+                        valid_row_count=len(exec_result.df),
+                    )
+                    out_path = get_output_path(file_path.name, "处理结果")
+                    _write_process_excel(_pr, out_path)
+                    cleanup_old_reports()
+                    report_filename = out_path.name
+                except Exception:
+                    pass
+                return JSONResponse({
+                    "success": True,
+                    "summary_text": exec_result.full_summary or "✅ 操作完成",
+                    "table_data": table_rows,
+                    "report_filename": report_filename,
+                    "steps": steps_summary,
+                    "chart_option": exec_result.chart_option,
+                    "data_info": {"raw": len(df_raw), "valid": len(exec_result.df)},
+                })
 
-    # 数据预处理
+        if ds_error and not (exec_result.analysis_result if ds_plan and not exec_result.success else False):
+            # DS 完全失败 → fallback 到 NLP Parser
+            try:
+                from core.nlp_parser import IntentParser
+                parser = IntentParser()
+                nlp_result = parser.parse(req.instruction, numeric_cols)
+                if nlp_result.get("error"):
+                    return JSONResponse({"success": False,
+                                        "error": f"AI 规划失败：{ds_error}\nNLP 解析也失败：{nlp_result['error']}"})
+                mode = nlp_result["analysis_mode"]
+                target_y = nlp_result["target_y"]
+                x_cols = nlp_result["x_columns"]
+                intent_info = {
+                    "mode": mode, "target_y": target_y, "x_cols": x_cols,
+                    "hint": "NLP fallback", "confidence": nlp_result.get("confidence", 0.5),
+                }
+            except Exception as e2:
+                return JSONResponse({"success": False,
+                                     "error": f"AI 规划失败：{ds_error}\nNLP fallback 也失败：{e2}"})
+
+    # ── 分析执行（DS run_analysis 或 NLP fallback 都走这里）──────────────────
+    # 若已经通过 DS run_analysis 拿到了 analysis，直接跳到报告生成
+    if 'analysis' not in dir():
+        # NLP fallback 路径：手动执行分析
+        _no_y_modes = {"pca", "cluster", "compare", "crosstab"}
+        if not target_y or target_y not in numeric_cols:
+            if mode == "multi_x_vs_y" and numeric_cols:
+                target_y = numeric_cols[0]
+            elif mode in _no_y_modes:
+                pass
+            else:
+                return JSONResponse({"success": False,
+                                     "error": f"目标变量 `{target_y}` 不存在，可用列：{numeric_cols[:5]}"})
+
+        if mode == "multi_x_vs_y" and not x_cols:
+            x_cols = [c for c in numeric_cols if c != target_y]
+
+        try:
+            from core.skill_executor import _run_analysis_skill
+            _sr = _run_analysis_skill(df_raw, mode=mode, target_y=target_y, x_cols=x_cols)
+            if _sr.error:
+                return JSONResponse({"success": False, "error": f"分析失败：{_sr.error}"})
+            analysis = _sr._analysis_result
+            raw_count = len(df_raw)
+            valid_count = len(_sr.df)
+            analysis.raw_row_count = raw_count
+            analysis.valid_row_count = valid_count
+        except Exception as e:
+            import traceback
+            return JSONResponse({"success": False,
+                                 "error": f"分析失败：{str(e)}\n{traceback.format_exc()}"})
+
+    # 统一兜底：确保 raw_count/valid_count/mode/intent_info 始终有值
+    raw_count = getattr(analysis, "raw_row_count", len(df_raw))
+    valid_count = getattr(analysis, "valid_row_count", raw_count)
+    mode = getattr(analysis, "mode", mode if 'mode' in dir() else "unknown")
+    if 'intent_info' not in dir():
+        intent_info = {"mode": mode, "target_y": getattr(analysis, "target_y", ""),
+                       "x_cols": [], "hint": "", "confidence": 1.0}
+
+    # 生成通俗报告（DeepSeek 翻译）
+    plain_report = ""
     try:
-        if mode == "y_vs_all":
-            cols_needed = numeric_cols
-        elif mode == "two_column":
-            if not x_cols:
-                return JSONResponse({"success": False, "error": "two_column 模式需要指定第二列"})
-            cols_needed = [target_y, x_cols[0]]
-        elif mode in {"pca", "cluster"}:
-            # pca/cluster 不依赖 target_y，使用 x_cols 或全部数值列
-            cols_needed = x_cols if x_cols else numeric_cols
-        elif mode in {"compare", "crosstab"}:
-            # compare/crosstab 的 x_cols 可能含分类列，取 df_raw 中实际存在的列
-            raw_cols = list(df_raw.columns)
-            all_needed = ([target_y] if target_y else []) + x_cols
-            cols_needed = [c for c in all_needed if c in raw_cols] or numeric_cols
-        else:
-            cols_needed = ([target_y] if target_y else []) + x_cols
-
-        clean_df, raw_count, valid_count = preprocess_for_analysis(df_raw, cols_needed)
-        if valid_count < 10:
-            return JSONResponse({"success": False, "error": f"有效数据不足（{valid_count} 行），无法进行可靠分析"})
-    except Exception as e:
-        return JSONResponse({"success": False, "error": f"数据预处理失败：{str(e)}"})
-
-    # 执行分析
-    try:
-        if mode == "y_vs_all":
-            analysis = analyze_y_vs_all(clean_df, target_y)
-        elif mode == "two_column":
-            analysis = analyze_two_column(clean_df, x_cols[0], target_y)
-        elif mode == "multi_x_vs_y":
-            valid_x = [c for c in x_cols if c in clean_df.columns]
-            if not valid_x:
-                return JSONResponse({"success": False, "error": "所有自变量列在清洗后均不存在"})
-            analysis = analyze_multi_x_vs_y(clean_df, target_y, valid_x)
-        elif mode == "time_series":
-            time_c = x_cols[0] if x_cols else None
-            if not time_c:
-                return JSONResponse({"success": False, "error": "时序分析需要指定时间列（x_columns）"})
-            from core.analysis_engine import analyze_time_series
-            analysis = analyze_time_series(clean_df, time_c, target_y)
-        elif mode == "pca":
-            cols_for_pca = x_cols if x_cols else [c for c in numeric_cols if c != target_y]
-            if len(cols_for_pca) < 2:
-                return JSONResponse({"success": False, "error": "PCA 至少需要 2 个变量"})
-            from core.analysis_engine import analyze_pca
-            analysis = analyze_pca(clean_df, cols_for_pca)
-        elif mode == "anova":
-            group_c = x_cols[0] if x_cols else None
-            if not group_c:
-                return JSONResponse({"success": False, "error": "ANOVA 需要指定分组列（x_columns）"})
-            from core.analysis_engine import analyze_anova
-            analysis = analyze_anova(clean_df, target_y, group_c)
-        elif mode == "logistic":
-            valid_x = [c for c in x_cols if c in clean_df.columns]
-            if not valid_x:
-                valid_x = [c for c in numeric_cols if c != target_y]
-            from core.analysis_engine import analyze_logistic
-            analysis = analyze_logistic(clean_df, target_y, valid_x)
-        elif mode == "cluster":
-            cols_for_cluster = x_cols if x_cols else [c for c in numeric_cols if c != target_y]
-            if len(cols_for_cluster) < 2:
-                return JSONResponse({"success": False, "error": "聚类至少需要 2 个变量"})
-            from core.analysis_engine import analyze_cluster
-            analysis = analyze_cluster(clean_df, cols_for_cluster)
-        elif mode == "neural_reg":
-            valid_x = [c for c in x_cols if c in clean_df.columns]
-            if not valid_x:
-                valid_x = [c for c in numeric_cols if c != target_y]
-            from core.analysis_engine import analyze_neural_reg
-            analysis = analyze_neural_reg(clean_df, target_y, valid_x)
-        elif mode == "ridge_lasso":
-            valid_x = [c for c in x_cols if c in clean_df.columns]
-            if not valid_x:
-                valid_x = [c for c in numeric_cols if c != target_y]
-            from core.analysis_engine import analyze_ridge_lasso
-            analysis = analyze_ridge_lasso(clean_df, target_y, valid_x)
-        elif mode == "model_comparison":
-            valid_x = [c for c in x_cols if c in clean_df.columns]
-            if not valid_x:
-                valid_x = [c for c in numeric_cols if c != target_y]
-            if len(valid_x) < 1:
-                return JSONResponse({"success": False, "error": "模型对比至少需要 1 个自变量"})
-            analysis = analyze_model_comparison(clean_df, target_y, valid_x)
-        elif mode == "compare":
-            group_c = x_cols[0] if x_cols else None
-            if not group_c:
-                return JSONResponse({"success": False, "error": "对比分析需要指定分组列（x_columns）"})
-            analysis = analyze_compare(clean_df, target_y, group_c)
-        elif mode == "crosstab":
-            if len(x_cols) < 1:
-                return JSONResponse({"success": False, "error": "交叉分析至少需要 1 个列（行分组列）"})
-            row_c = x_cols[0]
-            col_c = x_cols[1] if len(x_cols) >= 2 else target_y
-            val_c = target_y if target_y in clean_df.columns else ""
-            analysis = analyze_crosstab(clean_df, row_c, col_c, val_c)
-        else:
-            return JSONResponse({"success": False, "error": f"未知分析模式：{mode}"})
-        analysis.raw_row_count = raw_count
-        analysis.valid_row_count = valid_count
-    except Exception as e:
-        import traceback
-        return JSONResponse({"success": False, "error": f"分析失败：{str(e)}\n{traceback.format_exc()}"})
+        from core.plain_reporter import generate_plain_report
+        plain_report = generate_plain_report(analysis)
+    except Exception:
+        pass
 
     # 生成报告
     report_filename = None
@@ -638,18 +772,32 @@ async def api_analyze(req: AnalyzeRequest):
         pass
 
     # 根据用户指令意图，选择专项格式化器输出差异化结果
-    # 优先用 instruction 文字（不论 AI 模式是否开启），无指令时用 manual_mode 作为后备
     format_instruction = req.instruction.strip() if req.instruction.strip() else req.manual_mode
     formatted_text = format_result(analysis, format_instruction)
 
-    return {
+    import math
+
+    def _sanitize_val(obj):
+        if isinstance(obj, float) and (math.isnan(obj) or math.isinf(obj)):
+            return None
+        if isinstance(obj, dict):
+            return {k: _sanitize_val(v) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [_sanitize_val(v) for v in obj]
+        return obj
+
+    chart_option = _sanitize_val(_build_chart_from_analysis(analysis))
+
+    return _sanitize_val({
         "success": True,
         "summary_text": formatted_text,
+        "plain_report": plain_report,
         "table_data": _build_table_data(analysis),
         "report_filename": report_filename,
         "intent": intent_info,
         "data_info": {"raw": raw_count, "valid": valid_count},
-    }
+        "chart_option": chart_option,
+    })
 
 
 # ──────────────────────────────────────────────────────────
@@ -832,19 +980,35 @@ async def api_process(req: ProcessRequest):
 
     # 写入 Excel
     report_filename = None
+    _write_error = None
     try:
         from utils.file_manager import get_output_path
         out_path = get_output_path(file_path.name, op)
         _write_process_excel(result, out_path)
         cleanup_old_reports()
         report_filename = out_path.name
-    except Exception:
-        pass
+    except Exception as _e:
+        _write_error = str(_e)  # 不静默吞掉，供调试
 
-    # 转换 result_df 为前端可渲染的表格
+    # 转换结果为前端可渲染的表格（优先取多 Sheet 第一张，兜底取 result_df）
+    import math as _math
+
+    def _safe_rows(df: pd.DataFrame, limit: int = 100) -> list:
+        """把 DataFrame 转为 JSON 安全的 records，NaN/Inf 替换为 None。"""
+        preview = df.head(limit)
+        records = preview.where(pd.notnull(preview), None).to_dict("records")
+        def _fix(v):
+            if isinstance(v, float) and (_math.isnan(v) or _math.isinf(v)):
+                return None
+            return v
+        return [{k: _fix(v) for k, v in row.items()} for row in records]
+
     table_rows = []
-    if result.result_df is not None and not result.result_df.empty:
-        table_rows = result.result_df.head(100).to_dict("records")
+    if result.result_sheets:
+        first_sheet = next(iter(result.result_sheets.values()))
+        table_rows = _safe_rows(first_sheet)
+    elif result.result_df is not None and not result.result_df.empty:
+        table_rows = _safe_rows(result.result_df)
 
     return {
         "success": True,
@@ -852,6 +1016,7 @@ async def api_process(req: ProcessRequest):
         "table_data": table_rows,
         "report_filename": report_filename,
         "data_info": {"raw": result.raw_row_count, "valid": result.valid_row_count},
+        **({"write_warning": _write_error} if _write_error else {}),
     }
 
 
@@ -971,7 +1136,8 @@ async def api_chat(req: ChatRequest):
         proc_result = ProcessResult(
             operation="chat",
             summary_text=exec_result.full_summary,
-            result_df=exec_result.df,
+            result_df=exec_result.df if not exec_result.result_sheets else None,
+            result_sheets=exec_result.result_sheets or {},
         )
         proc_result.raw_row_count = len(df_raw)
         proc_result.valid_row_count = len(exec_result.df)
@@ -995,7 +1161,11 @@ async def api_chat(req: ChatRequest):
         return obj
 
     table_rows = []
-    if exec_result.df is not None and not exec_result.df.empty:
+    if exec_result.result_sheets:
+        first_sheet = next(iter(exec_result.result_sheets.values()))
+        _safe_df = first_sheet.head(200).where(pd.notnull(first_sheet.head(200)), None)
+        table_rows = _sanitize(_safe_df.to_dict("records"))
+    elif exec_result.df is not None and not exec_result.df.empty:
         _safe_df = exec_result.df.head(200).where(pd.notnull(exec_result.df.head(200)), None)
         table_rows = _sanitize(_safe_df.to_dict("records"))
 

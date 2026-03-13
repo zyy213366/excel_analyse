@@ -369,6 +369,39 @@ class ExcelProcessor:
             valid_row_count=raw,
         )
 
+    # ── 5b. 按列数拆分（每 N 列一组） ──────────────────────
+
+    @staticmethod
+    def split_by_col_count(df: pd.DataFrame, n: int) -> ProcessResult:
+        """
+        将 DataFrame 按列数切分：每 n 列一组，生成多个子表（保留行索引列除外）。
+        例：20 列数据按 5 列一组 → 4 张子表。
+        """
+        cols = list(df.columns)
+        if n <= 0 or n > len(cols):
+            return ProcessResult(
+                operation="split_col",
+                summary_text=f"❌ 无效分组数 n={n}，总列数为 {len(cols)}",
+            )
+        groups = [cols[i:i + n] for i in range(0, len(cols), n)]
+        sheets = {f"第{idx + 1}组": df[grp].reset_index(drop=True)
+                  for idx, grp in enumerate(groups)}
+
+        summary_lines = [
+            f"## ✂️ 按列拆分完成（每 {n} 列一组）",
+            f"- 共 {len(cols)} 列，拆分为 **{len(sheets)}** 张子表",
+        ]
+        for k, v in sheets.items():
+            summary_lines.append(f"  - `{k}`：{list(v.columns)}")
+
+        return ProcessResult(
+            operation="split_col",
+            summary_text="\n".join(summary_lines),
+            result_sheets=sheets,
+            raw_row_count=len(df),
+            valid_row_count=len(df),
+        )
+
     # ── 6. 求和 ──────────────────────────────────────────
 
     @staticmethod

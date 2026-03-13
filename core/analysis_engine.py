@@ -131,6 +131,7 @@ class AnalysisResult:
     crosstab_value_col: str = ""                             # 空则计数，非空则聚合
     crosstab_agg: str = "count"                              # count / sum / mean
     crosstab_df: Optional[pd.DataFrame] = None               # 透视表结果
+    crosstab_row_pct_df: Optional[pd.DataFrame] = None       # 行百分比表
 
 
 # ──────────────────────────────────────────────────────────
@@ -721,6 +722,10 @@ def analyze_logistic(df: pd.DataFrame, target_y: str, x_cols: list[str]) -> Anal
     from sklearn.preprocessing import StandardScaler
     from sklearn.metrics import accuracy_score, roc_auc_score
 
+    x_cols = [c for c in x_cols if c in df.columns and c != target_y]
+    if not x_cols:
+        raise ValueError("没有有效的自变量列，请确认列名存在于数据中")
+
     X = df[x_cols].values
     y = df[target_y].values
     classes = sorted(set(y))
@@ -878,6 +883,11 @@ def analyze_neural_reg(df: pd.DataFrame, target_y: str, x_cols: list[str]) -> An
     from sklearn.preprocessing import StandardScaler
     from sklearn.metrics import r2_score, mean_absolute_error
 
+    # 过滤不存在的列（防止 cols_needed 与 clean_df 不一致）
+    x_cols = [c for c in x_cols if c in df.columns and c != target_y]
+    if not x_cols:
+        raise ValueError(f"没有有效的自变量列，请确认列名存在于数据中")
+
     X = df[x_cols].values
     y = df[target_y].values
     n = len(y)
@@ -960,6 +970,10 @@ def analyze_ridge_lasso(df: pd.DataFrame, target_y: str, x_cols: list[str],
     from sklearn.linear_model import RidgeCV, LassoCV
     from sklearn.preprocessing import StandardScaler
     from sklearn.metrics import r2_score
+
+    x_cols = [c for c in x_cols if c in df.columns and c != target_y]
+    if not x_cols:
+        raise ValueError("没有有效的自变量列，请确认列名存在于数据中")
 
     X = df[x_cols].values
     y = df[target_y].values
@@ -1085,6 +1099,11 @@ def analyze_model_comparison(
     from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
     import warnings
 
+    # ── 列名防御过滤 ──
+    x_cols = [c for c in x_cols if c in df.columns and c != target_y]
+    if not x_cols:
+        raise ValueError("没有有效的自变量列，请确认列名存在于数据中")
+
     # ── 变量类型检测 ──
     feature_types = _detect_feature_types(df, x_cols)
 
@@ -1209,32 +1228,59 @@ def analyze_compare(df: pd.DataFrame, value_col: str, group_col: str) -> Analysi
     - >2组：单因素 ANOVA
     """
     from scipy import stats
+    import warnings
 
-    groups = [g[value_col].dropna().values for _, g in df.groupby(group_col)]
     group_names = df[group_col].dropna().unique().tolist()
 
     stat_rows = []
     for name, grp in df.groupby(group_col):
         vals = grp[value_col].dropna()
+        n = len(vals)
+        # 单元素组 std 无意义，用 NaN 而不是触发 RuntimeWarning
+        std_val = float(vals.std()) if n >= 2 else float("nan")
         stat_rows.append({
             "组别": name,
-            "样本量": len(vals),
-            "均值": round(vals.mean(), 4),
-            "标准差": round(vals.std(), 4),
-            "中位数": round(vals.median(), 4),
-            "最小值": round(vals.min(), 4),
-            "最大值": round(vals.max(), 4),
+            "样本量": n,
+            "均值": round(float(vals.mean()), 4) if n > 0 else float("nan"),
+            "标准差": round(std_val, 4) if not (std_val != std_val) else "—",
+            "中位数": round(float(vals.median()), 4) if n > 0 else float("nan"),
+            "最小值": round(float(vals.min()), 4) if n > 0 else float("nan"),
+            "最大值": round(float(vals.max()), 4) if n > 0 else float("nan"),
         })
     group_stats_df = pd.DataFrame(stat_rows)
 
-    if len(groups) == 2:
-        stat, p_val = stats.ttest_ind(*groups, equal_var=False)
-        test_name = "独立样本 t 检验"
-    else:
-        stat, p_val = stats.f_oneway(*groups)
-        test_name = "单因素 ANOVA"
+    # 只保留样本量 >= 2 的组用于统计检验
+    groups_for_test = [
+        grp[value_col].dropna().values
+        for _, grp in df.groupby(group_col)
+        if len(grp[value_col].dropna()) >= 2
+    ]
 
-    sig = "**显著差异**（p < 0.05）" if p_val < 0.05 else "无显著差异（p ≥ 0.05）"
+    insufficient_note = ""
+    n_skipped = len(group_names) - len(groups_for_test)
+    if n_skipped > 0:
+        insufficient_note = f"\n> ⚠️ {n_skipped} 个分组样本量不足（< 2），已排除在统计检验之外。"
+
+    stat, p_val, test_name = float("nan"), float("nan"), "无法检验"
+
+    if len(groups_for_test) >= 2:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            if len(groups_for_test) == 2:
+                stat, p_val = stats.ttest_ind(*groups_for_test, equal_var=False)
+                test_name = "独立样本 t 检验"
+            else:
+                stat, p_val = stats.f_oneway(*groups_for_test)
+                test_name = "单因素 ANOVA"
+    else:
+        test_name = "样本量不足，无法执行统计检验"
+
+    import math
+    if math.isnan(stat) or math.isnan(p_val):
+        sig = "无法判断（数据不足）"
+    else:
+        sig = "**显著差异**（p < 0.05）" if p_val < 0.05 else "无显著差异（p ≥ 0.05）"
+
     n_groups = len(group_names)
 
     result = AnalysisResult(
@@ -1247,8 +1293,8 @@ def analyze_compare(df: pd.DataFrame, value_col: str, group_col: str) -> Analysi
         compare_value_col=value_col,
         compare_group_stats_df=group_stats_df,
         compare_test_name=test_name,
-        compare_stat=float(stat),
-        compare_p_value=float(p_val),
+        compare_stat=stat if not math.isnan(stat) else None,
+        compare_p_value=p_val if not math.isnan(p_val) else None,
     )
 
     lines = [
@@ -1265,10 +1311,18 @@ def analyze_compare(df: pd.DataFrame, value_col: str, group_col: str) -> Analysi
     lines += [
         f"",
         f"### 统计检验：{test_name}",
-        f"- 统计量：**{stat:.4f}**",
-        f"- p 值：**{p_val:.4f}**",
-        f"- 结论：各组 {value_col} {sig}",
     ]
+    if not math.isnan(stat) and not math.isnan(p_val):
+        lines += [
+            f"- 统计量：**{stat:.4f}**",
+            f"- p 值：**{p_val:.4f}**",
+            f"- 结论：各组 {value_col} {sig}",
+        ]
+    else:
+        lines.append(f"- {sig}")
+    if insufficient_note:
+        lines.append(insufficient_note)
+
     result.summary_text = "\n".join(lines)
     return result
 
@@ -1284,10 +1338,15 @@ def analyze_crosstab(df: pd.DataFrame,
                      agg: str = "count") -> AnalysisResult:
     """
     交叉分析（透视表）：
-    - value_col 为空 / agg=="count"：计数交叉表
-    - 否则：聚合（sum/mean）透视表
+    - value_col 为空 / agg=="count"：计数交叉表 + 卡方检验
+    - 否则：聚合（sum/mean）透视表 + 描述性统计
     """
-    if agg == "count" or not value_col:
+    from scipy import stats
+    import math
+
+    is_count = (agg == "count" or not value_col)
+
+    if is_count:
         pivot = pd.crosstab(df[row_col], df[col_col])
         agg_desc = "计数"
     else:
@@ -1297,6 +1356,37 @@ def analyze_crosstab(df: pd.DataFrame,
         pivot = pivot.round(4)
         agg_desc = "求和" if agg_fn == "sum" else "求均值"
 
+    n_rows, n_cols = pivot.shape
+
+    # ── 统计检验 ────────────────────────────────────────────
+    chi2_stat = chi2_p = cramers_v = None
+    chi2_note = ""
+    if is_count and n_rows >= 2 and n_cols >= 2:
+        try:
+            chi2_stat, chi2_p, dof, expected = stats.chi2_contingency(pivot)
+            # Cramér's V（效应量，0~1）
+            n_total = int(pivot.values.sum())
+            cramers_v = math.sqrt(chi2_stat / (n_total * (min(n_rows, n_cols) - 1))) if n_total > 0 else 0
+            # 期望频数 < 5 的格子占比（卡方检验可靠性判断）
+            low_exp_pct = (expected < 5).sum() / expected.size
+            if low_exp_pct > 0.2:
+                chi2_note = f"（⚠️ {low_exp_pct:.0%} 的格子期望频数 < 5，卡方结果仅供参考）"
+        except Exception:
+            pass
+
+    # ── 行列百分比（仅计数模式）──────────────────────────────
+    row_pct_df = pivot.div(pivot.sum(axis=1), axis=0).mul(100).round(1) if is_count else None
+    col_pct_df = pivot.div(pivot.sum(axis=0), axis=1).mul(100).round(1) if is_count else None
+
+    # ── 找最高频/最大值组合 ──────────────────────────────────
+    top_combos = []
+    flat = pivot.stack().reset_index()
+    flat.columns = [row_col, col_col, "值"]
+    flat_sorted = flat.sort_values("值", ascending=False).head(5)
+    for _, r in flat_sorted.iterrows():
+        top_combos.append((r[row_col], r[col_col], r["值"]))
+
+    # ── 构建结果 ────────────────────────────────────────────
     result = AnalysisResult(
         mode="crosstab",
         target_y=value_col or "计数",
@@ -1308,24 +1398,73 @@ def analyze_crosstab(df: pd.DataFrame,
         crosstab_value_col=value_col,
         crosstab_agg=agg,
         crosstab_df=pivot,
+        crosstab_row_pct_df=row_pct_df,
     )
 
-    n_rows, n_cols = pivot.shape
+    # ── summary_text ────────────────────────────────────────
     lines = [
         f"## 🔀 交叉分析：{row_col} × {col_col}",
         f"",
         f"- 聚合方式：**{agg_desc}**",
         f"- 透视表规模：**{n_rows} 行 × {n_cols} 列**",
+        f"- 总样本量：**{len(df)} 条**",
         f"",
-        f"> 详细数据已写入 Excel 报告，支持下载查看。",
     ]
+
+    # 卡方检验结论
+    if chi2_stat is not None:
+        sig_text = "**存在显著关联**（p < 0.05）" if chi2_p < 0.05 else "无显著关联（p ≥ 0.05）"
+        if cramers_v is not None:
+            if cramers_v < 0.1:
+                effect = "极弱"
+            elif cramers_v < 0.3:
+                effect = "弱"
+            elif cramers_v < 0.5:
+                effect = "中等"
+            else:
+                effect = "强"
+            effect_desc = f"Cramér's V = **{cramers_v:.3f}**（{effect}关联）"
+        else:
+            effect_desc = ""
+
+        lines += [
+            f"### 📐 独立性检验（卡方检验）{chi2_note}",
+            f"- χ² 统计量：**{chi2_stat:.4f}**，自由度：**{dof}**",
+            f"- p 值：**{chi2_p:.4f}**",
+            f"- 结论：{row_col} 与 {col_col} {sig_text}",
+        ]
+        if effect_desc:
+            lines.append(f"- 关联强度：{effect_desc}")
+        lines.append("")
+
+    # Top 组合
+    if top_combos:
+        lines.append(f"### 🏆 Top 5 高频组合")
+        lines.append(f"| {row_col} | {col_col} | {'频次' if is_count else agg_desc} |")
+        lines.append("|------|------|------|")
+        for r, c, v in top_combos:
+            lines.append(f"| {r} | {c} | {v} |")
+        lines.append("")
+
+    # 透视表预览
     if not pivot.empty:
-        preview = pivot.iloc[:5, :5]
-        lines.append(f"\n#### 预览（前 {min(5, n_rows)} 行 × {min(5, n_cols)} 列）")
+        preview = pivot.iloc[:6, :6]
+        lines.append(f"### 📊 透视表预览（前 {min(6, n_rows)} 行 × {min(6, n_cols)} 列）")
         try:
             lines.append(preview.to_markdown())
         except ImportError:
             lines.append("```\n" + preview.to_string() + "\n```")
+
+    # 行百分比预览（计数模式）
+    if row_pct_df is not None and not row_pct_df.empty:
+        lines.append(f"\n### 📈 行百分比（%）— {row_col} 内各 {col_col} 占比")
+        preview_pct = row_pct_df.iloc[:6, :6]
+        try:
+            lines.append(preview_pct.to_markdown())
+        except ImportError:
+            lines.append("```\n" + preview_pct.to_string() + "\n```")
+
+    lines.append("\n> 完整透视表已写入 Excel 报告，支持下载查看。")
 
     result.summary_text = "\n".join(lines)
     return result

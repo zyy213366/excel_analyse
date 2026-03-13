@@ -33,6 +33,24 @@ def build_report(result: AnalysisResult, output_path: str | Path) -> Path:
         _build_multi_x_vs_y(writer, workbook, result, fmt_title, fmt_header, fmt_center, fmt_num4, fmt_pct)
     elif result.mode == "model_comparison":
         _build_model_comparison(writer, workbook, result, fmt_title, fmt_header, fmt_center, fmt_num4, fmt_pct)
+    elif result.mode == "compare":
+        _build_compare(writer, workbook, result, fmt_title, fmt_header, fmt_center, fmt_num4, fmt_pct)
+    elif result.mode == "crosstab":
+        _build_crosstab(writer, workbook, result, fmt_title, fmt_header, fmt_center, fmt_num4, fmt_pct)
+    elif result.mode == "time_series":
+        _build_time_series(writer, workbook, result, fmt_title, fmt_header, fmt_center, fmt_num4, fmt_pct)
+    elif result.mode == "pca":
+        _build_pca(writer, workbook, result, fmt_title, fmt_header, fmt_center, fmt_num4, fmt_pct)
+    elif result.mode == "anova":
+        _build_anova(writer, workbook, result, fmt_title, fmt_header, fmt_center, fmt_num4, fmt_pct)
+    elif result.mode == "logistic":
+        _build_logistic(writer, workbook, result, fmt_title, fmt_header, fmt_center, fmt_num4, fmt_pct)
+    elif result.mode == "cluster":
+        _build_cluster(writer, workbook, result, fmt_title, fmt_header, fmt_center, fmt_num4, fmt_pct)
+    elif result.mode in ("neural_reg", "ridge_lasso"):
+        _build_generic(writer, workbook, result, fmt_title, fmt_header, fmt_center, fmt_num4, fmt_pct)
+    else:
+        _build_generic(writer, workbook, result, fmt_title, fmt_header, fmt_center, fmt_num4, fmt_pct)
 
     writer.close()
     return output_path
@@ -504,3 +522,299 @@ def _build_model_comparison(writer, workbook, result: "AnalysisResult",
         chart_residual.set_legend({"none": True})
         chart_residual.set_size({"width": 450, "height": 200})
         msht.insert_chart("G22", chart_residual)
+
+
+# ──────────────────────────────────────────────────────────
+# 内部辅助：写摘要 Sheet
+# ──────────────────────────────────────────────────────────
+
+def _write_summary_sheet(sht, result, fmt_title, title_text: str) -> int:
+    """写入标题 + summary_text，返回已用行数（供后续定位图表）"""
+    sht.set_column("A:A", 55)
+    sht.write("A1", title_text, fmt_title)
+    lines = result.summary_text.split("\n")
+    for i, line in enumerate(lines):
+        sht.write(i + 2, 0, line.lstrip("#").lstrip())
+    return len(lines) + 3
+
+
+# ──────────────────────────────────────────────────────────
+# 对比分析 (compare)
+# ──────────────────────────────────────────────────────────
+
+def _build_compare(writer, workbook, result: "AnalysisResult",
+                   fmt_title, fmt_header, fmt_center, fmt_num4, fmt_pct):
+    sht = workbook.add_worksheet("对比分析报告")
+    used = _write_summary_sheet(
+        sht, result, fmt_title,
+        f"📊 对比分析报告 — {result.compare_value_col} 按 {result.compare_group_col}",
+    )
+
+    if result.compare_group_stats_df is None:
+        return
+
+    gs = result.compare_group_stats_df
+    gs.to_excel(writer, sheet_name="各组统计", index=False)
+    _format_sheet_headers(writer.sheets["各组统计"], workbook, fmt_header)
+
+    n = len(gs)
+    # 各组均值柱状图
+    chart = workbook.add_chart({"type": "column"})
+    chart.add_series({
+        "name":       "均值",
+        "categories": ["各组统计", 1, 0, n, 0],   # 组别列
+        "values":     ["各组统计", 1, 2, n, 2],   # 均值列（第3列）
+        "fill":       {"color": "#4472C4"},
+        "data_labels": {"value": True, "num_format": "0.00"},
+    })
+    chart.set_title({"name": f"{result.compare_value_col} 各组均值对比"})
+    chart.set_x_axis({"name": result.compare_group_col})
+    chart.set_y_axis({"name": result.compare_value_col})
+    chart.set_legend({"none": True})
+    chart.set_size({"width": 500, "height": 300})
+    sht.insert_chart(f"D{used + 2}", chart)
+
+    # 检验结果
+    test_row = used + 20
+    sht.write(test_row, 0, "统计检验", fmt_header)
+    sht.write(test_row + 1, 0, result.compare_test_name)
+    sht.write(test_row + 2, 0, f"统计量 = {result.compare_stat:.4f}，p = {result.compare_p_value:.4f}")
+    sig = "显著（p<0.05）" if result.compare_p_value < 0.05 else "不显著（p≥0.05）"
+    sht.write(test_row + 3, 0, f"结论：组间差异{sig}")
+
+
+# ──────────────────────────────────────────────────────────
+# 交叉分析 (crosstab)
+# ──────────────────────────────────────────────────────────
+
+def _build_crosstab(writer, workbook, result: "AnalysisResult",
+                    fmt_title, fmt_header, fmt_center, fmt_num4, fmt_pct):
+    sht = workbook.add_worksheet("交叉分析报告")
+    _write_summary_sheet(
+        sht, result, fmt_title,
+        f"📊 交叉分析报告 — {result.crosstab_row_col} × {result.crosstab_col_col}",
+    )
+
+    if result.crosstab_df is None:
+        return
+
+    result.crosstab_df.to_excel(writer, sheet_name="交叉表")
+    _format_sheet_headers(writer.sheets["交叉表"], workbook, fmt_header)
+
+
+# ──────────────────────────────────────────────────────────
+# 时间序列 (time_series)
+# ──────────────────────────────────────────────────────────
+
+def _build_time_series(writer, workbook, result: "AnalysisResult",
+                       fmt_title, fmt_header, fmt_center, fmt_num4, fmt_pct):
+    sht = workbook.add_worksheet("时序分析报告")
+    used = _write_summary_sheet(
+        sht, result, fmt_title,
+        f"📈 时间序列分析报告 — {result.value_col}",
+    )
+
+    # 分解数据
+    if result.ts_decompose_df is not None:
+        result.ts_decompose_df.to_excel(writer, sheet_name="季节分解")
+        _format_sheet_headers(writer.sheets["季节分解"], workbook, fmt_header)
+        n = len(result.ts_decompose_df)
+        chart = workbook.add_chart({"type": "line"})
+        for col_idx, col_name, color in [(0, "trend", "#4472C4"), (1, "seasonal", "#70AD47")]:
+            chart.add_series({
+                "name":   col_name,
+                "values": ["季节分解", 1, col_idx, n, col_idx],
+                "line":   {"color": color, "width": 1.5},
+                "marker": {"type": "none"},
+            })
+        chart.set_title({"name": f"{result.value_col} 趋势 & 季节分量"})
+        chart.set_size({"width": 700, "height": 300})
+        sht.insert_chart(f"A{used + 2}", chart)
+
+    # 预测数据
+    if result.ts_forecast_df is not None:
+        result.ts_forecast_df.to_excel(writer, sheet_name="ARIMA预测", index=False)
+        _format_sheet_headers(writer.sheets["ARIMA预测"], workbook, fmt_header)
+
+
+# ──────────────────────────────────────────────────────────
+# PCA (pca)
+# ──────────────────────────────────────────────────────────
+
+def _build_pca(writer, workbook, result: "AnalysisResult",
+               fmt_title, fmt_header, fmt_center, fmt_num4, fmt_pct):
+    sht = workbook.add_worksheet("PCA分析报告")
+    used = _write_summary_sheet(
+        sht, result, fmt_title,
+        f"🔬 PCA 主成分分析报告（{len(result.x_columns)} 个变量 → {result.pca_n_components} 个主成分）",
+    )
+
+    if result.pca_loadings_df is not None:
+        result.pca_loadings_df.to_excel(writer, sheet_name="载荷矩阵")
+        _format_sheet_headers(writer.sheets["载荷矩阵"], workbook, fmt_header)
+
+    # 方差贡献率柱状图
+    if result.pca_explained_ratio:
+        n = len(result.pca_explained_ratio)
+        ev_data = pd.DataFrame({
+            "主成分": [f"PC{i+1}" for i in range(n)],
+            "方差贡献率": result.pca_explained_ratio,
+            "累计贡献率": result.pca_cumulative_ratio,
+        })
+        ev_data.to_excel(writer, sheet_name="_pca_ev", index=False)
+        writer.sheets["_pca_ev"].hide()
+
+        chart = workbook.add_chart({"type": "column"})
+        chart.add_series({
+            "name":       "方差贡献率",
+            "categories": ["_pca_ev", 1, 0, n, 0],
+            "values":     ["_pca_ev", 1, 1, n, 1],
+            "fill":       {"color": "#4472C4"},
+            "data_labels": {"value": True, "num_format": "0.0%"},
+        })
+        # 累计折线
+        chart2 = workbook.add_chart({"type": "line"})
+        chart2.add_series({
+            "name":       "累计贡献率",
+            "categories": ["_pca_ev", 1, 0, n, 0],
+            "values":     ["_pca_ev", 1, 2, n, 2],
+            "line":       {"color": "#ED7D31", "width": 2},
+            "marker":     {"type": "circle", "size": 5},
+        })
+        chart.combine(chart2)
+        chart.set_title({"name": "PCA 方差贡献率"})
+        chart.set_y_axis({"name": "贡献率", "num_format": "0%"})
+        chart.set_size({"width": 500, "height": 300})
+        sht.insert_chart(f"D{used + 2}", chart)
+
+    if result.pca_scores_df is not None:
+        result.pca_scores_df.head(500).to_excel(writer, sheet_name="主成分得分", index=False)
+        _format_sheet_headers(writer.sheets["主成分得分"], workbook, fmt_header)
+
+
+# ──────────────────────────────────────────────────────────
+# ANOVA (anova)
+# ──────────────────────────────────────────────────────────
+
+def _build_anova(writer, workbook, result: "AnalysisResult",
+                 fmt_title, fmt_header, fmt_center, fmt_num4, fmt_pct):
+    sht = workbook.add_worksheet("ANOVA分析报告")
+    used = _write_summary_sheet(
+        sht, result, fmt_title,
+        f"📊 单因素 ANOVA 报告 — {result.target_y} 按 {result.anova_group_col}",
+    )
+
+    if result.anova_group_stats_df is not None:
+        gs = result.anova_group_stats_df
+        gs.to_excel(writer, sheet_name="各组统计", index=False)
+        _format_sheet_headers(writer.sheets["各组统计"], workbook, fmt_header)
+
+        n = len(gs)
+        chart = workbook.add_chart({"type": "column"})
+        chart.add_series({
+            "name":       "均值",
+            "categories": ["各组统计", 1, 0, n, 0],
+            "values":     ["各组统计", 1, 2, n, 2],
+            "fill":       {"color": "#4472C4"},
+            "data_labels": {"value": True, "num_format": "0.00"},
+        })
+        chart.set_title({"name": f"{result.target_y} 各组均值（ANOVA）"})
+        chart.set_size({"width": 500, "height": 300})
+        sht.insert_chart(f"D{used + 2}", chart)
+
+    if result.anova_tukey_df is not None:
+        result.anova_tukey_df.to_excel(writer, sheet_name="Tukey HSD", index=False)
+        _format_sheet_headers(writer.sheets["Tukey HSD"], workbook, fmt_header)
+
+
+# ──────────────────────────────────────────────────────────
+# 逻辑回归 (logistic)
+# ──────────────────────────────────────────────────────────
+
+def _build_logistic(writer, workbook, result: "AnalysisResult",
+                    fmt_title, fmt_header, fmt_center, fmt_num4, fmt_pct):
+    sht = workbook.add_worksheet("逻辑回归报告")
+    used = _write_summary_sheet(
+        sht, result, fmt_title,
+        f"🔢 逻辑回归分析报告 — {result.target_y}",
+    )
+
+    # 性能指标
+    sht.write(used + 1, 0, "模型性能", fmt_header)
+    sht.write(used + 2, 0, f"准确率 (Accuracy) = {result.logistic_accuracy:.4f}")
+    if result.logistic_auc > 0:
+        sht.write(used + 3, 0, f"AUC-ROC = {result.logistic_auc:.4f}")
+
+    if result.logistic_coef_df is not None:
+        result.logistic_coef_df.to_excel(writer, sheet_name="回归系数", index=False)
+        coef_sht = writer.sheets["回归系数"]
+        coef_sht.set_column("A:A", 20)
+        coef_sht.set_column("B:D", 14)
+
+        k = len(result.logistic_coef_df)
+        chart = workbook.add_chart({"type": "bar"})
+        chart.add_series({
+            "name":       "系数",
+            "categories": ["回归系数", 1, 0, k, 0],
+            "values":     ["回归系数", 1, 1, k, 1],
+            "fill":       {"color": "#4472C4"},
+        })
+        chart.set_title({"name": "逻辑回归系数"})
+        chart.set_y_axis({"reverse": True})
+        chart.set_size({"width": 500, "height": max(280, k * 30)})
+        coef_sht.insert_chart("F2", chart)
+
+
+# ──────────────────────────────────────────────────────────
+# 聚类分析 (cluster)
+# ──────────────────────────────────────────────────────────
+
+def _build_cluster(writer, workbook, result: "AnalysisResult",
+                   fmt_title, fmt_header, fmt_center, fmt_num4, fmt_pct):
+    sht = workbook.add_worksheet("聚类分析报告")
+    used = _write_summary_sheet(
+        sht, result, fmt_title,
+        f"🔵 K-Means 聚类分析报告（{result.cluster_n} 个簇）",
+    )
+
+    if result.cluster_centers_df is not None:
+        result.cluster_centers_df.to_excel(writer, sheet_name="簇中心", index=True)
+        _format_sheet_headers(writer.sheets["簇中心"], workbook, fmt_header)
+
+    if result.cluster_stats_df is not None:
+        result.cluster_stats_df.to_excel(writer, sheet_name="各簇统计", index=False)
+        _format_sheet_headers(writer.sheets["各簇统计"], workbook, fmt_header)
+
+        n = len(result.cluster_stats_df)
+        chart = workbook.add_chart({"type": "column"})
+        chart.add_series({
+            "name":       "样本量",
+            "categories": ["各簇统计", 1, 0, n, 0],
+            "values":     ["各簇统计", 1, 1, n, 1],
+            "fill":       {"color": "#4472C4"},
+        })
+        chart.set_title({"name": "各簇样本量分布"})
+        chart.set_size({"width": 400, "height": 250})
+        sht.insert_chart(f"D{used + 2}", chart)
+
+
+# ──────────────────────────────────────────────────────────
+# 通用兜底（neural_reg / ridge_lasso / 未知模式）
+# ──────────────────────────────────────────────────────────
+
+def _build_generic(writer, workbook, result: "AnalysisResult",
+                   fmt_title, fmt_header, fmt_center, fmt_num4, fmt_pct):
+    mode_titles = {
+        "neural_reg":  "🧠 神经网络回归分析报告",
+        "ridge_lasso": "📐 岭回归 / 套索回归分析报告",
+    }
+    title_text = mode_titles.get(result.mode, f"📊 分析报告（{result.mode}）")
+    sht = workbook.add_worksheet("分析报告")
+    _write_summary_sheet(sht, result, fmt_title, title_text)
+
+    # ridge_lasso 系数表
+    if result.mode == "ridge_lasso" and result.ridge_coef_df is not None:
+        result.ridge_coef_df.to_excel(writer, sheet_name="系数对比", index=False)
+        coef_sht = writer.sheets["系数对比"]
+        coef_sht.set_column("A:A", 20)
+        coef_sht.set_column("B:E", 14)

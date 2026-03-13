@@ -207,13 +207,36 @@ def skill_aggregate(
     group_by: list,
     agg: dict,
 ) -> SkillResult:
-    missing = [c for c in group_by if c not in df.columns]
-    if missing:
-        return SkillResult(df, "", error=f"分组列不存在：{missing}")
     missing_val = [c for c in agg if c not in df.columns]
     if missing_val:
         return SkillResult(df, "", error=f"聚合列不存在：{missing_val}")
     try:
+        # group_by 为空时：全局聚合，返回单行结果
+        if not group_by:
+            row = {}
+            for col, func in agg.items():
+                s = df[col]
+                if func == "sum":
+                    row[f"{col}_sum"] = s.sum()
+                elif func == "mean":
+                    row[f"{col}_mean"] = s.mean()
+                elif func == "count":
+                    row[f"{col}_count"] = s.count()
+                elif func == "max":
+                    row[f"{col}_max"] = s.max()
+                elif func == "min":
+                    row[f"{col}_min"] = s.min()
+                elif func == "median":
+                    row[f"{col}_median"] = s.median()
+                elif func == "std":
+                    row[f"{col}_std"] = s.std()
+                else:
+                    row[f"{col}_{func}"] = getattr(s, func)()
+            result = pd.DataFrame([row])
+            return SkillResult(result, f"全局聚合 {agg}，结果：{row}")
+        missing = [c for c in group_by if c not in df.columns]
+        if missing:
+            return SkillResult(df, "", error=f"分组列不存在：{missing}")
         result = df.groupby(group_by).agg(**{
             f"{col}_{func}": (col, func) for col, func in agg.items()
         }).reset_index()
@@ -246,6 +269,24 @@ def skill_build_chart(
         return SkillResult(df, "", error=str(e))
     except Exception as e:
         return SkillResult(df, "", error=f"图表生成失败：{e}")
+
+
+def skill_split_columns(df: pd.DataFrame, n: int = 5) -> SkillResult:
+    """按每 n 列为一组，拆分为多张表。"""
+    cols = list(df.columns)
+    if n <= 0 or n > len(cols):
+        return SkillResult(df, "", error=f"无效分组数 n={n}，总列数为 {len(cols)}")
+    groups = [cols[i:i + n] for i in range(0, len(cols), n)]
+    sheets = {
+        f"第{idx + 1}组": df[grp].reset_index(drop=True)
+        for idx, grp in enumerate(groups)
+    }
+    sr = SkillResult(
+        df=df,
+        summary=f"已按每 {n} 列分组，共拆分为 {len(groups)} 张表",
+    )
+    sr._result_sheets = sheets  # executor 提取此字段
+    return sr
 
 
 def skill_describe(
@@ -330,9 +371,45 @@ SKILL_REGISTRY: dict = {
         },
         "fn": skill_build_chart,
     },
+    "split_columns": {
+        "description": (
+            "按每 N 列为一组，将宽表拆分为多张子表（多 Sheet）。"
+            "适用于：'按5列一组拆分'、'每3列拆一张表'、'按N列拆分为多张表'。"
+            "⚠️ 不是删除列，是把所有列分组保留到不同 Sheet。"
+        ),
+        "params_schema": {"n": "int — 每组列数（默认5）"},
+        "fn": skill_split_columns,
+    },
     "describe": {
         "description": "输出统计摘要。适用于：'数据概览'、'统计摘要'",
         "params_schema": {"columns": "list[str]（可选）— 仅统计指定列，默认全列"},
         "fn": skill_describe,
+    },
+    "run_analysis": {
+        "description": (
+            "运行统计/机器学习分析，返回分析报告。"
+            "可用 mode（必填）：\n"
+            "  y_vs_all       — 找出影响 Y 的所有因素（特征重要性排名），推荐用于'找出影响因素'\n"
+            "  model_comparison — 多模型赛马（线性/岭回归/随机森林/梯度提升/神经网络），找最优模型\n"
+            "  multi_x_vs_y   — 多元线性回归，分析多个 X 对 Y 的系数和 p 值\n"
+            "  neural_reg     — MLP 神经网络回归\n"
+            "  ridge_lasso    — 岭回归 + 套索回归（处理多重共线性）\n"
+            "  logistic       — 逻辑回归（二分类 Y）\n"
+            "  cluster        — K-Means 聚类\n"
+            "  pca            — 主成分分析（降维）\n"
+            "  anova          — 方差分析（分组差异检验）\n"
+            "  time_series    — 时间序列趋势分析\n"
+            "  two_column     — 两列相关性分析\n"
+            "典型用法：\n"
+            "  '找出影响Y的因素' → mode='y_vs_all', target_y='Y'\n"
+            "  '建立多个回归模型比较' → mode='model_comparison', target_y='Y'\n"
+            "  '用神经网络预测Y' → mode='neural_reg', target_y='Y'"
+        ),
+        "params_schema": {
+            "mode": "str — 分析模式，见上方描述",
+            "target_y": "str — 目标变量列名（因变量 Y）",
+            "x_cols": "list[str]（可选）— 自变量列表，默认自动选择所有数值列",
+        },
+        "fn": None,  # 由 skill_executor 特殊处理
     },
 }

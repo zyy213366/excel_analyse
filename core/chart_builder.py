@@ -228,8 +228,12 @@ def build_chart(chart_type: str,
         return build_bar(df, x_col, y_cols, title,
                          horizontal=extra.get("horizontal", False))
     elif chart_type == "pie":
-        name_col = y_cols[0] if len(y_cols) >= 1 else x_col
-        val_col = y_cols[1] if len(y_cols) >= 2 else y_cols[0]
+        # 饼图语义：x_col = 类别/标签列，y_cols[0] = 数值列
+        # 若 y_cols 为空则报明确错误，避免 IndexError
+        if not y_cols:
+            raise ValueError("饼图需要在 y 中指定数值列，例如 y=['count'] 或 y=['Y_sum']")
+        name_col = x_col          # 类别来自 x
+        val_col  = y_cols[0]      # 数值来自 y[0]
         return build_pie(df, name_col, val_col, title)
     elif chart_type == "line":
         return build_line(df, x_col, y_cols, title,
