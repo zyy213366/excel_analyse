@@ -147,71 +147,125 @@ class AnalyzeRequest(BaseModel):
     manual_x_cols: list[str] = []
 
 
+def _extract_col(inst: str, all_cols: list) -> Optional[str]:
+    """从指令文本中提取列名（优先最长匹配，大小写不敏感）"""
+    cols_by_len = sorted(all_cols, key=len, reverse=True)
+    for col in cols_by_len:
+        if col in inst:
+            return col
+    inst_l = inst.lower()
+    for col in cols_by_len:
+        if col.lower() in inst_l:
+            return col
+    return None
+
+
+def _clean_lookup_condition(inst: str) -> str:
+    """
+    从查找类指令中提取条件文本：
+    1. 移除动词前缀（查找/筛选/过滤/找出/找到/搜索/显示）
+    2. 移除常见结尾（的行/的记录/的数据/的/行/条）
+    3. 去除首尾标点和空格
+    """
+    _lookup_verbs = ["查找", "筛选", "过滤", "找出", "找到", "搜索", "显示", "列出"]
+    condition = inst
+    for v in _lookup_verbs:
+        condition = condition.replace(v, "")
+    # 从后向前去掉多余尾缀
+    _tails = ["的行", "的记录", "的数据", "的条目", "的数据行", "行", "记录", "条", "的"]
+    changed = True
+    while changed:
+        changed = False
+        for tail in _tails:
+            if condition.endswith(tail):
+                condition = condition[: -len(tail)]
+                changed = True
+                break
+    return condition.strip("，,。.、 \t")
+
+
 def _parse_process_instruction(inst: str, all_cols: list) -> Optional[dict]:
     """
-    从自然语言指令中检测 Excel 处理/运算操作，返回含 'op' 字段的参数字典，或 None。
+    从自然语言指令检测 Excel 处理/运算操作，返回含 'op' 字段的参数字典，或 None。
     优先于 NLP 分析器执行，避免清洗/查找等操作被误判为统计分析。
+
+    识别范围：
+      clean         数据清洗（去重/填充/删除空列/标准化）
+      lookup        查找/筛选（支持各种条件）
+      count         统计行数/分组计数
+      calc_sum      求和
+      calc_mean     求均值
+      calc_extremes 求极值（最大/最小/极差）
+      split         按列拆分为多Sheet
     """
-    # ── 数据清洗 ─────────────────────────────────────────────
-    _clean_kw = ["清洗", "去重", "去除重复", "填充缺失", "预处理", "数据预处理", "标准化"]
+    # ── 数据清洗 ─────────────────────────────────────────────────────────
+    # 关键词分组：只要命中其中任何一组，就确认是清洗操作
+    _clean_kw = [
+        "清洗", "预处理", "数据预处理",           # 通用清洗
+        "去重", "去除重复", "重复行",              # 去重
+        "填充缺失", "填充空值", "补全缺失",        # 填充
+        "去除空列", "删除空列", "删除全空",        # 删除空列
+        "去除全是空", "删除全是空", "空列",        # 删除空列（自然语言）
+        "标准化",                                  # 标准化
+    ]
     if any(k in inst for k in _clean_kw):
         drop_dup = any(k in inst for k in ["去重", "去除重复", "重复行", "重复"])
         fill_m: Optional[str] = None
-        if any(k in inst for k in ["填充缺失", "填充", "补全", "补缺"]):
+        if any(k in inst for k in ["填充缺失", "填充空值", "补全缺失", "填充", "补全", "补缺"]):
             if "中位数" in inst:
                 fill_m = "median"
             elif "众数" in inst:
                 fill_m = "mode"
-            elif any(k in inst for k in ["用0", "填0", "零"]):
-                fill_m = "0"
+            elif any(k in inst for k in ["用0", "填0", "零填充", "填零"]):
+                fill_m = "zero"
             else:
                 fill_m = "mean"
         normalize = "标准化" in inst
-        # 若只说"清洗/预处理"，默认两者都做
-        if not drop_dup and fill_m is None and not normalize:
+        # 判断是否需要删除空列
+        drop_empty = any(k in inst for k in [
+            "去除空列", "删除空列", "删除全空", "去除全是空", "删除全是空", "空列",
+            "全是空", "全空", "空的列",
+        ])
+        # 若只说"清洗/预处理"，默认去重+填充均值
+        if not drop_dup and fill_m is None and not normalize and not drop_empty:
             drop_dup, fill_m = True, "mean"
         return {
             "op": "clean",
             "drop_duplicates": drop_dup,
             "fill_missing": fill_m or "mean",
             "normalize": normalize,
+            "drop_empty_cols": drop_empty,
         }
 
-    # ── 查找/筛选（必须在极值判断之前，避免"查找最大"误入calc_extremes）────
-    _lookup_kw = ["查找", "筛选", "过滤", "找出", "找到", "搜索"]
+    # ── 查找/筛选（必须在极值检测之前）─────────────────────────────────
+    _lookup_kw = ["查找", "筛选", "过滤", "找出", "找到", "搜索", "显示", "列出"]
     if any(k in inst for k in _lookup_kw):
-        condition = inst
-        for k in _lookup_kw:
-            condition = condition.replace(k, "")
-        for tail in ["的行", "的记录", "的数据", "行", "记录"]:
-            if condition.endswith(tail):
-                condition = condition[: -len(tail)]
-        condition = condition.strip("，,。. ")
+        condition = _clean_lookup_condition(inst)
         return {"op": "lookup", "condition": condition}
 
-    # ── 计数/统计数量 ─────────────────────────────────────────
-    _count_kw = ["计数", "统计数量", "有多少行", "有多少条", "统计行数"]
+    # ── 计数/统计数量 ──────────────────────────────────────────────────
+    _count_kw = ["计数", "统计数量", "有多少行", "有多少条", "统计行数", "共多少行"]
     if any(k in inst for k in _count_kw):
         return {"op": "count", "group_col": None, "condition": ""}
 
-    # ── 求和 ──────────────────────────────────────────────────
-    if any(k in inst.lower() for k in ["求和", "总和", "合计", "求总"]):
-        vc = next((c for c in all_cols if c in inst), None)
+    # ── 求和 ─────────────────────────────────────────────────────────
+    if any(k in inst for k in ["求和", "总和", "合计", "求总和", "加总"]):
+        vc = _extract_col(inst, all_cols)
         return {"op": "calc_sum", "value_col": vc}
 
-    # ── 均值/平均 ─────────────────────────────────────────────
-    if any(k in inst.lower() for k in ["均值", "平均值", "平均数"]):
-        vc = next((c for c in all_cols if c in inst), None)
+    # ── 均值/平均 ────────────────────────────────────────────────────
+    if any(k in inst for k in ["均值", "平均值", "平均数", "求平均"]):
+        vc = _extract_col(inst, all_cols)
         return {"op": "calc_mean", "value_col": vc}
 
-    # ── 最大最小/极差（在查找之后，避免"查找最大"走这里）────────
-    if any(k in inst for k in ["最大值", "最小值", "极差", "极值"]):
-        vc = next((c for c in all_cols if c in inst), None)
+    # ── 最大最小/极差（在查找之后，避免"查找最大"走这里）───────────
+    if any(k in inst for k in ["最大值", "最小值", "极差", "极值", "求极值"]):
+        vc = _extract_col(inst, all_cols)
         return {"op": "calc_extremes", "value_col": vc}
 
-    # ── 拆分（按列分Sheet）────────────────────────────────────
-    if any(k in inst for k in ["拆分", "分组导出", "按列拆分", "分sheet", "分Sheet"]):
-        sc = next((c for c in all_cols if c in inst), None)
+    # ── 拆分（按列分Sheet）─────────────────────────────────────────
+    if any(k in inst for k in ["拆分", "分组导出", "按列拆分", "分sheet", "分Sheet", "按列分"]):
+        sc = _extract_col(inst, all_cols)
         return {"op": "split", "split_col": sc}
 
     return None

@@ -93,6 +93,68 @@ class TestApplyCondition:
         result = _apply_condition(df, "y最大")  # 小写 y 匹配大写 Y 列
         assert result["Y"].values[0] == df["Y"].max()
 
+    # ── Top-N 极值 ──────────────────────────────────────────
+
+    def test_top_n_max_chinese(self, sample_df):
+        """'列名最大的三行' → nlargest(3)"""
+        result = _apply_condition(sample_df, "销售额最大的三")
+        assert len(result) == 3
+        assert result["销售额"].max() == 1500
+        # 应当按降序排列（nlargest 本身有序）
+        vals = result["销售额"].tolist()
+        assert vals == sorted(vals, reverse=True)
+
+    def test_top_n_max_digit(self, sample_df):
+        """'列名最大的5行' → nlargest(5)"""
+        result = _apply_condition(sample_df, "销售额最大的5")
+        assert len(result) == 5
+
+    def test_top_n_min_chinese(self, sample_df):
+        """'列名最小的两行' → nsmallest(2)"""
+        result = _apply_condition(sample_df, "销售额最小的两")
+        assert len(result) == 2
+        assert result["销售额"].min() == 700
+
+    def test_top_n_with_suffix(self, sample_df):
+        """带'行'后缀的 top-N"""
+        result = _apply_condition(sample_df, "销售额最大的3行")
+        assert len(result) == 3
+
+    def test_top_n_case_insensitive(self, sample_df):
+        """列名大小写不敏感 + Top-N"""
+        df = sample_df.rename(columns={"销售额": "Y"})
+        result = _apply_condition(df, "y最大的三")
+        assert len(result) == 3
+        assert result["Y"].iloc[0] == df["Y"].max()
+
+    # ── 中文比较运算符 ───────────────────────────────────────
+
+    def test_zh_op_gt(self, sample_df):
+        result = _apply_condition(sample_df, "销售额大于1000")
+        assert len(result) == 4
+        assert all(result["销售额"] > 1000)
+
+    def test_zh_op_lt(self, sample_df):
+        result = _apply_condition(sample_df, "销售额小于900")
+        assert len(result) == 2
+
+    def test_zh_op_gte(self, sample_df):
+        result = _apply_condition(sample_df, "销售额大于等于1500")
+        assert len(result) == 1
+
+    def test_zh_op_lte(self, sample_df):
+        result = _apply_condition(sample_df, "销售额小于等于800")
+        assert len(result) == 2
+
+    def test_zh_op_eq_str(self, sample_df):
+        result = _apply_condition(sample_df, "部门等于销售")
+        assert len(result) == 3
+
+    def test_zh_op_eq_for(self, sample_df):
+        """'为' 也映射到 =="""
+        result = _apply_condition(sample_df, "部门为销售")
+        assert len(result) == 3
+
 
 # ──────────────────────────────────────────────────────────
 # ExcelProcessor — Excel处理操作
@@ -114,6 +176,32 @@ class TestExcelProcessorClean:
     def test_summary_contains_stats(self, sample_df):
         result = ExcelProcessor.process_clean(sample_df)
         assert "清洗后" in result.summary_text
+
+    def test_drop_empty_cols(self):
+        """去除全空列"""
+        df = pd.DataFrame({
+            "a": [1, 2, 3],
+            "空列": [None, None, None],   # 应被删除
+            "b": [4, 5, 6],
+        })
+        result = ExcelProcessor.process_clean(
+            df, drop_duplicates=False, fill_missing=None, drop_empty_cols=True
+        )
+        assert "空列" not in result.result_df.columns
+        assert "a" in result.result_df.columns
+        assert "删除全空列" in result.summary_text
+
+    def test_keep_non_empty_cols(self):
+        """有值的列不能被删除"""
+        df = pd.DataFrame({
+            "a": [1, None, 3],
+            "b": [None, None, None],
+        })
+        result = ExcelProcessor.process_clean(
+            df, drop_duplicates=False, fill_missing=None, drop_empty_cols=True
+        )
+        assert "a" in result.result_df.columns
+        assert "b" not in result.result_df.columns
 
 
 class TestExcelProcessorLookup:
@@ -367,6 +455,43 @@ class TestParseProcessInstruction:
     def test_none_for_regression(self):
         p = _parse_process_instruction("对销售额做多元回归分析", self.COLS)
         assert p is None
+
+    # ── 新增场景：用户实际触发的问题 ─────────────────────────
+
+    def test_clean_drop_empty_cols(self):
+        """'去除全是空元素的列' → clean + drop_empty_cols=True"""
+        p = _parse_process_instruction("对数据进行清洗，去除全是空元素的列", self.COLS)
+        assert p is not None
+        assert p["op"] == "clean"
+        assert p["drop_empty_cols"] is True
+
+    def test_clean_drop_empty_cols2(self):
+        p = _parse_process_instruction("删除空列并去重", self.COLS)
+        assert p is not None and p["op"] == "clean"
+        assert p["drop_empty_cols"] is True
+
+    def test_lookup_top_n_chinese(self):
+        """'查找y最大的三行' → lookup，条件 = 'y最大的三'"""
+        p = _parse_process_instruction("查找y最大的三行", self.COLS)
+        assert p is not None
+        assert p["op"] == "lookup"
+        # 条件应包含列名和极值语义，不应还保留动词或"行"后缀
+        cond = p["condition"]
+        assert "查找" not in cond
+        assert cond.endswith("行") is False  # "行" 后缀应已被去掉
+
+    def test_lookup_condition_extraction(self):
+        """'筛选销售额大于1000的行' → condition = '销售额大于1000'"""
+        p = _parse_process_instruction("筛选销售额大于1000的行", self.COLS)
+        assert p is not None and p["op"] == "lookup"
+        assert p["condition"] == "销售额大于1000"
+
+    def test_lookup_no_trailing_de(self):
+        """条件提取后不应残留孤立的'的'"""
+        p = _parse_process_instruction("查找月份包含2024-01的行", self.COLS)
+        assert p is not None
+        cond = p["condition"]
+        assert cond == "月份包含2024-01"
 
 
 if __name__ == "__main__":

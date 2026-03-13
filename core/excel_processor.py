@@ -11,40 +11,114 @@ from core.process_result import ProcessResult
 
 
 # ──────────────────────────────────────────────────────────
+# 内部辅助
+# ──────────────────────────────────────────────────────────
+
+# 中文数字映射
+_CN_NUM = {
+    "一": 1, "两": 2, "二": 2, "三": 3, "四": 4, "五": 5,
+    "六": 6, "七": 7, "八": 8, "九": 9, "十": 10,
+    "十一": 11, "十二": 12, "十三": 13, "十四": 14, "十五": 15,
+    "二十": 20, "三十": 30, "五十": 50, "百": 100,
+}
+
+
+def _cn_num(s: str) -> int:
+    """中文或阿拉伯数字字符串 → int，解析失败返回 1"""
+    s = s.strip()
+    if s.isdigit():
+        return int(s)
+    return _CN_NUM.get(s, 1)
+
+
+def _match_col(col_hint: str, df: pd.DataFrame) -> Optional[str]:
+    """大小写不敏感地在 df.columns 中查找列名"""
+    if col_hint in df.columns:
+        return col_hint
+    col_hint_l = col_hint.lower()
+    return next((c for c in df.columns if c.lower() == col_hint_l), None)
+
+
+# ──────────────────────────────────────────────────────────
 # 条件解析辅助函数
 # ──────────────────────────────────────────────────────────
 
+# 中文比较运算符（降序：先匹配长词，避免"大于等于"被"大于"提前截断）
+_ZH_OPS = [
+    ("大于等于", ">="), ("小于等于", "<="), ("不等于", "!="), ("不是", "!="),
+    ("大于", ">"), ("小于", "<"), ("等于", "=="), ("为", "=="),
+]
+
+
 def _apply_condition(df: pd.DataFrame, condition: str) -> pd.DataFrame:
     """
-    将自然语言/简单表达式条件应用到 DataFrame，返回过滤后子集。
+    将自然语言 / 简单表达式条件应用到 DataFrame，返回过滤后子集。
     支持格式：
-      - "列名 > 100"
-      - "列名 == 值"
+      - "列名 > 100" / "列名大于100"
+      - "列名 == 值" / "列名等于值" / "列名为值"
       - "列名 包含 关键词"
-      - "列名 != 值"
-      - "列名 >= 值"
-      - "列名 <= 值"
-    若解析失败，返回原始 DataFrame（不过滤）。
+      - "列名最大" / "列名最小"          → 返回极值所在行（可多行）
+      - "列名最大的3" / "列名最大的三"   → Top-N 行
+    若解析失败，返回原始 DataFrame（不过滤），同时在 name 属性中标记"未匹配"。
     """
     if not condition or not condition.strip():
         return df
 
     cond = condition.strip()
 
-    # 中文 "包含" → str.contains
-    m = re.match(r"^(.+?)\s+包含\s+(.+)$", cond)
+    # ── 1. 中文"包含" → str.contains ──────────────────────
+    m = re.match(r"^(.+?)\s*包含\s*(.+)$", cond)
     if m:
-        col, val = m.group(1).strip(), m.group(2).strip()
-        if col in df.columns:
-            return df[df[col].astype(str).str.contains(val, na=False)]
+        col = _match_col(m.group(1).strip(), df)
+        if col:
+            return df[df[col].astype(str).str.contains(m.group(2).strip(), na=False)]
         return df
 
-    # 数值比较运算符
+    # ── 2. Top-N 极值：列名最大/最小的N（必须在单极值之前检测）──
+    m = re.match(
+        r"^(.+?)(?:中)?(?:(最大)|(最小))的?(\d+|[一两二三四五六七八九十百]+)(?:行|条|个)?$",
+        cond,
+    )
+    if m:
+        col = _match_col(m.group(1).strip(), df)
+        if col is not None:
+            is_max = m.group(2) is not None
+            n = _cn_num(m.group(4))
+            return df.nlargest(n, col) if is_max else df.nsmallest(n, col)
+
+    # ── 3. 单极值：列名最大 / 列名最小 ─────────────────────
+    m = re.match(r"^(.+?)(?:中)?(?:最大|最小)(?:的(?:行|记录|数据|值)?)?$", cond)
+    if m:
+        col = _match_col(m.group(1).strip(), df)
+        if col is not None:
+            extreme_val = df[col].max() if "最大" in cond else df[col].min()
+            return df[df[col] == extreme_val]
+
+    # ── 4. 中文比较运算符 ───────────────────────────────────
+    for zh_op, sym in _ZH_OPS:
+        m = re.match(rf"^(.+?)\s*{zh_op}\s*(.+)$", cond)
+        if m:
+            col = _match_col(m.group(1).strip(), df)
+            val_str = m.group(2).strip()
+            if col is not None:
+                try:
+                    val = float(val_str)
+                    ops = {">=": "__ge__", "<=": "__le__", "!=": "__ne__",
+                           "==": "__eq__", ">": "__gt__", "<": "__lt__"}
+                    return df[getattr(df[col], ops[sym])(val)]
+                except ValueError:
+                    if sym in ("==", "!="):
+                        fn = (lambda s, v: s == v) if sym == "==" else (lambda s, v: s != v)
+                        return df[fn(df[col].astype(str), val_str)]
+            break
+
+    # ── 5. 标准数值/字符串比较运算符 ────────────────────────
     for op in [">=", "<=", "!=", "==", ">", "<"]:
         m = re.match(rf"^(.+?)\s*{re.escape(op)}\s*(.+)$", cond)
         if m:
-            col, val_str = m.group(1).strip(), m.group(2).strip()
-            if col not in df.columns:
+            col = _match_col(m.group(1).strip(), df)
+            val_str = m.group(2).strip()
+            if col is None:
                 break
             try:
                 val = float(val_str)
@@ -52,25 +126,13 @@ def _apply_condition(df: pd.DataFrame, condition: str) -> pd.DataFrame:
                        "==": "__eq__", ">": "__gt__", "<": "__lt__"}
                 return df[getattr(df[col], ops[op])(val)]
             except ValueError:
-                # 字符串比较
-                ops_str = {"==": lambda s, v: s == v, "!=": lambda s, v: s != v}
-                if op in ops_str:
-                    return df[ops_str[op](df[col].astype(str), val_str)]
+                if op in ("==", "!="):
+                    fn = (lambda s, v: s == v) if op == "==" else (lambda s, v: s != v)
+                    return df[fn(df[col].astype(str), val_str)]
             break
 
-    # 自然语言极值：列名最大 / 列名最小（支持大小写不敏感列名匹配）
-    m = re.match(r"^(.+?)(?:中)?(?:最大|最小)(?:的(?:行|记录|数据|值)?)?$", cond)
-    if m:
-        col_hint = m.group(1).strip()
-        is_max = "最大" in cond
-        col = col_hint if col_hint in df.columns else next(
-            (c for c in df.columns if c.lower() == col_hint.lower()), None
-        )
-        if col is not None:
-            extreme_val = df[col].max() if is_max else df[col].min()
-            return df[df[col] == extreme_val]
-
-    return df  # 解析失败，返回原 df
+    # 解析失败，返回原 df（调用方可据 len 判断是否有效）
+    return df
 
 
 # ──────────────────────────────────────────────────────────
@@ -86,14 +148,27 @@ class ExcelProcessor:
     def process_clean(df: pd.DataFrame,
                       drop_duplicates: bool = True,
                       fill_missing: Optional[str] = "mean",
-                      normalize: bool = False) -> ProcessResult:
+                      normalize: bool = False,
+                      drop_empty_cols: bool = False) -> ProcessResult:
         """
-        数据清洗：去重 + 填充缺失值 + （可选）数值标准化。
-        fill_missing: "mean" / "median" / "zero" / "drop" / None
+        数据清洗：
+        - drop_empty_cols : 删除全为空的列
+        - drop_duplicates : 去除重复行
+        - fill_missing    : "mean"/"median"/"mode"/"zero"/"drop"/None
+        - normalize       : Z-score 标准化数值列
         """
         raw = len(df)
         result = df.copy()
-        stats = {}
+        stats: dict = {}
+
+        # 删除全空列
+        if drop_empty_cols:
+            before_cols = set(result.columns)
+            result = result.dropna(axis=1, how="all")
+            dropped = [c for c in before_cols if c not in result.columns]
+            stats["删除全空列"] = dropped if dropped else []
+            if dropped:
+                stats["删除列数"] = len(dropped)
 
         # 去重
         if drop_duplicates:
@@ -105,13 +180,18 @@ class ExcelProcessor:
         missing_before = result.isnull().sum().sum()
         stats["填充前缺失值总数"] = int(missing_before)
 
-        # 填充缺失值
+        # 填充缺失值（数值列）
         num_cols = result.select_dtypes(include="number").columns.tolist()
-        if fill_missing == "mean":
+        if fill_missing == "mean" and num_cols:
             result[num_cols] = result[num_cols].fillna(result[num_cols].mean())
-        elif fill_missing == "median":
+        elif fill_missing == "median" and num_cols:
             result[num_cols] = result[num_cols].fillna(result[num_cols].median())
-        elif fill_missing == "zero":
+        elif fill_missing == "mode":
+            for col in result.columns:
+                mode_val = result[col].mode()
+                if not mode_val.empty:
+                    result[col] = result[col].fillna(mode_val.iloc[0])
+        elif fill_missing in ("zero", "0") and num_cols:
             result[num_cols] = result[num_cols].fillna(0)
         elif fill_missing == "drop":
             result = result.dropna()
@@ -129,8 +209,13 @@ class ExcelProcessor:
             "## 🧹 数据清洗完成",
             f"- 原始行数：**{raw}**，清洗后：**{valid}**（删除 {raw - valid} 行）",
         ]
+        if drop_empty_cols:
+            dropped_list = stats.get("删除全空列", [])
+            lines.append(f"- 删除全空列：**{len(dropped_list)}** 列"
+                         + (f"（{', '.join(dropped_list[:5])}）" if dropped_list else "（无）"))
         for k, v in stats.items():
-            lines.append(f"- {k}：**{v}**")
+            if k not in ("删除全空列", "删除列数"):
+                lines.append(f"- {k}：**{v}**")
 
         return ProcessResult(
             operation="clean",
@@ -147,10 +232,17 @@ class ExcelProcessor:
     def process_lookup(df: pd.DataFrame, condition: str) -> ProcessResult:
         """
         按条件筛选行。condition 格式见 _apply_condition。
+        若条件解析失败（返回行数 == 原始行数 且条件非空），给出警告。
         """
         raw = len(df)
         result = _apply_condition(df, condition)
         valid = len(result)
+
+        if condition.strip() and valid == raw:
+            # 可能条件未被识别，添加提示
+            warn = f"\n> ⚠️ 条件 `{condition}` 未能成功解析，返回全量数据。支持格式：`列名 > 值`、`列名包含关键词`、`列名最大的3` 等"
+        else:
+            warn = ""
 
         return ProcessResult(
             operation="lookup",
@@ -158,6 +250,7 @@ class ExcelProcessor:
                 f"## 🔍 数据查找结果\n"
                 f"- 条件：`{condition}`\n"
                 f"- 共找到 **{valid}** 行数据（原始 {raw} 行）"
+                + warn
             ),
             result_df=result,
             raw_row_count=raw,
@@ -205,7 +298,7 @@ class ExcelProcessor:
     # ── 4. 多表合并 ──────────────────────────────────────
 
     @staticmethod
-    def process_merge(dfs: list[pd.DataFrame],
+    def process_merge(dfs: list,
                       how: str = "concat",
                       on: Optional[str] = None) -> ProcessResult:
         """
@@ -409,7 +502,6 @@ class ExcelProcessor:
         condition 格式："> 100" / "== 0" / "包含 关键词"
         """
         result = df.copy()
-        # 重用 _apply_condition 的逻辑，转化为 boolean mask
         full_cond = f"{value_col} {condition}"
         matched = _apply_condition(df, full_cond).index
         result[new_col] = false_label
@@ -434,9 +526,9 @@ class ExcelProcessor:
 
     @staticmethod
     def calc_aggregate(df: pd.DataFrame,
-                       value_cols: list[str],
+                       value_cols: list,
                        group_col: Optional[str] = None,
-                       agg_funcs: Optional[list[str]] = None) -> ProcessResult:
+                       agg_funcs: Optional[list] = None) -> ProcessResult:
         """
         合并计算：对多个数值列同时计算多种聚合指标（sum/mean/max/min/count）。
         """
