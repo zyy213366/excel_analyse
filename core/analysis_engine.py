@@ -1092,7 +1092,7 @@ def analyze_model_comparison(
     找出最优模型，并为每个模型保存预测值 vs 实际值数据（供报告绘图）。
     """
     from sklearn.linear_model import LinearRegression, RidgeCV
-    from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
+    from sklearn.ensemble import RandomForestRegressor, HistGradientBoostingRegressor
     from sklearn.neural_network import MLPRegressor
     from sklearn.model_selection import cross_val_score, KFold
     from sklearn.preprocessing import StandardScaler, LabelEncoder
@@ -1117,23 +1117,42 @@ def analyze_model_comparison(
     y = df[target_y].values.astype(float)
     n = len(y)
 
-    # ── 标准化（对线性/岭/神经网络有效，RF/GBR 无影响） ──
+    # ── 数据量过大时采样，保证响应速度（CV 上限 3000 行）──
+    MAX_CV_ROWS = 3000
+    if n > MAX_CV_ROWS:
+        rng = np.random.RandomState(42)
+        idx = rng.choice(n, MAX_CV_ROWS, replace=False)
+        X_cv, y_cv = X[idx], y[idx]
+        sample_note = f"（数据量 {n} 行，CV 随机抽样 {MAX_CV_ROWS} 行）"
+    else:
+        X_cv, y_cv = X, y
+        sample_note = ""
+
+    # ── 标准化（对线性/岭/神经网络有效，树模型无影响）──
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
+    X_cv_scaled = scaler.transform(X_cv)
 
-    # ── 候选模型定义 ──
+    # ── 候选模型（平衡速度与精度）──
+    n_feat = len(x_cols)
     models = {
         "线性回归":    LinearRegression(),
-        "岭回归":      RidgeCV(alphas=[0.01, 0.1, 1.0, 10.0]),
-        "随机森林":    RandomForestRegressor(n_estimators=100, random_state=RF_RANDOM_STATE, n_jobs=1),
-        "梯度提升":    GradientBoostingRegressor(n_estimators=100, random_state=RF_RANDOM_STATE),
+        "岭回归":      RidgeCV(alphas=[0.1, 1.0, 10.0]),
+        "随机森林":    RandomForestRegressor(
+                           n_estimators=50, max_depth=8,
+                           random_state=RF_RANDOM_STATE, n_jobs=-1),
+        "梯度提升":    HistGradientBoostingRegressor(
+                           max_iter=100, max_depth=5,
+                           random_state=RF_RANDOM_STATE),
         "神经网络MLP": MLPRegressor(
-            hidden_layer_sizes=(min(64, len(x_cols)*8), min(32, len(x_cols)*4)),
-            max_iter=500, random_state=RF_RANDOM_STATE, early_stopping=True
-        ),
+                           hidden_layer_sizes=(min(64, n_feat * 8), min(32, n_feat * 4)),
+                           max_iter=200, random_state=RF_RANDOM_STATE,
+                           early_stopping=True, n_iter_no_change=15),
     }
 
-    kf = KFold(n_splits=min(5, n // 5), shuffle=True, random_state=42)
+    n_cv = len(y_cv)
+    n_splits = max(2, min(5, n_cv // 10))
+    kf = KFold(n_splits=n_splits, shuffle=True, random_state=42)
 
     comparison_rows = []
     predictions_store = {}
@@ -1141,14 +1160,15 @@ def analyze_model_comparison(
 
     for model_name, model in models.items():
         use_scaled = model_name in ("线性回归", "岭回归", "神经网络MLP")
-        X_use = X_scaled if use_scaled else X
+        X_use_cv = X_cv_scaled if use_scaled else X_cv
+        X_use_all = X_scaled if use_scaled else X
 
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            cv_r2 = cross_val_score(model, X_use, y, cv=kf, scoring="r2")
-            model.fit(X_use, y)
+            cv_r2 = cross_val_score(model, X_use_cv, y_cv, cv=kf, scoring="r2")
+            model.fit(X_use_all, y)
 
-        y_pred = model.predict(X_use)
+        y_pred = model.predict(X_use_all)
         r2 = float(r2_score(y, y_pred))
         rmse = float(np.sqrt(mean_squared_error(y, y_pred)))
         mae = float(mean_absolute_error(y, y_pred))
@@ -1196,7 +1216,7 @@ def analyze_model_comparison(
     lines = [
         f"## 多模型对比分析（AutoML-lite）",
         f"**目标变量**：`{target_y}`  **输入特征**：{', '.join(f'`{c}`' for c in x_cols)}",
-        f"**有效样本**：{n} 行  **评估方式**：{min(5, n//5)} 折交叉验证",
+        f"**有效样本**：{n} 行  **评估方式**：{n_splits} 折交叉验证{sample_note}",
         f"",
         f"### 最优模型：{best_name}",
         f"- 交叉验证 R² = **{best_r2:.4f}**（越高越好）",
@@ -1206,7 +1226,7 @@ def analyze_model_comparison(
         f"|------|------|-------|------|------|-----|",
     ]
     for i, (_, row) in enumerate(comparison_df.iterrows()):
-        medal = medals[i] if i < len(medals) else str(i+1)
+        medal = medals[i] if i < len(medals) else str(i + 1)
         lines.append(
             f"| {medal} | **{row['模型']}** | {row['CV均值R²']:.4f} | "
             f"±{row['CV标准差']:.4f} | {row['RMSE']:.4f} | {row['MAE']:.4f} |"
