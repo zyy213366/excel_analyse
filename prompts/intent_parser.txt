@@ -14,6 +14,8 @@
 - **cluster**: 用于聚类/分组发现，当用户提到 K-Means、聚类、分群、客户分群时使用。x_columns 为参与聚类的列，target_y 可为空。
 - **neural_reg**: 用于神经网络回归，当用户提到神经网络、深度学习、MLP、非线性回归时使用。
 - **ridge_lasso**: 用于正则化回归，当用户提到岭回归、套索、Lasso、Ridge、正则化时使用。
+- **compare**: 用于对比分析，当用户提到"比较各组差异"、"对比分析"、"t检验"、"各组是否有显著差异"时使用。target_y 为数值列，x_columns 第一个元素为分组变量列（通常为类别列）。
+- **crosstab**: 用于交叉分析（透视表），当用户提到"交叉分析"、"透视表"、"交叉表"、"行列分析"、"各组各类别的分布"时使用。x_columns 第一个元素为行分组列，第二个为列分组列，target_y 为聚合数值列（计数时可为空）。
 
 ## 列名匹配规则
 1. 必须从上面"可用列名"中选择，不得捏造不存在的列名
@@ -24,7 +26,7 @@
 ## 输出格式
 只输出纯 JSON，不要任何额外说明或 markdown 代码块：
 {
-  "analysis_mode": "y_vs_all | two_column | multi_x_vs_y | time_series | pca | anova | logistic | cluster | neural_reg | ridge_lasso",
+  "analysis_mode": "y_vs_all | two_column | multi_x_vs_y | time_series | pca | anova | logistic | cluster | neural_reg | ridge_lasso | compare | crosstab",
   "target_y": "目标列名（必须在可用列名中）",
   "x_columns": ["自变量列名1", "自变量列名2"],
   "analysis_hint": "用一句话说明你理解的分析意图",

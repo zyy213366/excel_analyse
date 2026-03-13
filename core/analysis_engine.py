@@ -117,6 +117,21 @@ class AnalysisResult:
     mc_feature_types: dict = field(default_factory=dict)      # {列名: "continuous" / "categorical"}
     mc_cv_scores: dict = field(default_factory=dict)          # {模型名: [cv_r2_fold1, fold2, ...]}
 
+    # ── 对比分析 (compare) ───────────────────────────────────
+    compare_group_col: str = ""
+    compare_value_col: str = ""
+    compare_group_stats_df: Optional[pd.DataFrame] = None   # 各组 n/mean/std/median
+    compare_test_name: str = ""                              # "t-test" / "ANOVA"
+    compare_stat: float = 0.0
+    compare_p_value: float = 1.0
+
+    # ── 交叉分析 (crosstab) ──────────────────────────────────
+    crosstab_row_col: str = ""
+    crosstab_col_col: str = ""
+    crosstab_value_col: str = ""                             # 空则计数，非空则聚合
+    crosstab_agg: str = "count"                              # count / sum / mean
+    crosstab_df: Optional[pd.DataFrame] = None               # 透视表结果
+
 
 # ──────────────────────────────────────────────────────────
 # 模式1：Y vs All
@@ -1179,5 +1194,138 @@ def analyze_model_comparison(
         )
     lines.append(f"")
     lines.append(f"> Excel 报告中每个模型均有独立 Sheet，包含预测值 vs 实际值散点图与残差图。")
+    result.summary_text = "\n".join(lines)
+    return result
+
+
+# ──────────────────────────────────────────────────────────
+# 对比分析（compare）
+# ──────────────────────────────────────────────────────────
+
+def analyze_compare(df: pd.DataFrame, value_col: str, group_col: str) -> AnalysisResult:
+    """
+    对比分析：比较不同分组之间目标值的差异。
+    - 2组：独立样本 t 检验
+    - >2组：单因素 ANOVA
+    """
+    from scipy import stats
+
+    groups = [g[value_col].dropna().values for _, g in df.groupby(group_col)]
+    group_names = df[group_col].dropna().unique().tolist()
+
+    stat_rows = []
+    for name, grp in df.groupby(group_col):
+        vals = grp[value_col].dropna()
+        stat_rows.append({
+            "组别": name,
+            "样本量": len(vals),
+            "均值": round(vals.mean(), 4),
+            "标准差": round(vals.std(), 4),
+            "中位数": round(vals.median(), 4),
+            "最小值": round(vals.min(), 4),
+            "最大值": round(vals.max(), 4),
+        })
+    group_stats_df = pd.DataFrame(stat_rows)
+
+    if len(groups) == 2:
+        stat, p_val = stats.ttest_ind(*groups, equal_var=False)
+        test_name = "独立样本 t 检验"
+    else:
+        stat, p_val = stats.f_oneway(*groups)
+        test_name = "单因素 ANOVA"
+
+    sig = "**显著差异**（p < 0.05）" if p_val < 0.05 else "无显著差异（p ≥ 0.05）"
+    n_groups = len(group_names)
+
+    result = AnalysisResult(
+        mode="compare",
+        target_y=value_col,
+        x_columns=[group_col],
+        valid_row_count=len(df),
+        raw_row_count=len(df),
+        compare_group_col=group_col,
+        compare_value_col=value_col,
+        compare_group_stats_df=group_stats_df,
+        compare_test_name=test_name,
+        compare_stat=float(stat),
+        compare_p_value=float(p_val),
+    )
+
+    lines = [
+        f"## 📊 对比分析：{value_col} 按 {group_col}",
+        f"",
+        f"### 分组统计（共 {n_groups} 组）",
+        f"",
+        "| 组别 | 样本量 | 均值 | 标准差 | 中位数 |",
+        "|------|--------|------|--------|--------|",
+    ]
+    for _, r in group_stats_df.iterrows():
+        lines.append(f"| {r['组别']} | {r['样本量']} | {r['均值']} | {r['标准差']} | {r['中位数']} |")
+
+    lines += [
+        f"",
+        f"### 统计检验：{test_name}",
+        f"- 统计量：**{stat:.4f}**",
+        f"- p 值：**{p_val:.4f}**",
+        f"- 结论：各组 {value_col} {sig}",
+    ]
+    result.summary_text = "\n".join(lines)
+    return result
+
+
+# ──────────────────────────────────────────────────────────
+# 交叉分析（crosstab）
+# ──────────────────────────────────────────────────────────
+
+def analyze_crosstab(df: pd.DataFrame,
+                     row_col: str,
+                     col_col: str,
+                     value_col: str = "",
+                     agg: str = "count") -> AnalysisResult:
+    """
+    交叉分析（透视表）：
+    - value_col 为空 / agg=="count"：计数交叉表
+    - 否则：聚合（sum/mean）透视表
+    """
+    if agg == "count" or not value_col:
+        pivot = pd.crosstab(df[row_col], df[col_col])
+        agg_desc = "计数"
+    else:
+        agg_fn = "sum" if agg == "sum" else "mean"
+        pivot = df.pivot_table(index=row_col, columns=col_col,
+                               values=value_col, aggfunc=agg_fn)
+        pivot = pivot.round(4)
+        agg_desc = "求和" if agg_fn == "sum" else "求均值"
+
+    result = AnalysisResult(
+        mode="crosstab",
+        target_y=value_col or "计数",
+        x_columns=[row_col, col_col],
+        valid_row_count=len(df),
+        raw_row_count=len(df),
+        crosstab_row_col=row_col,
+        crosstab_col_col=col_col,
+        crosstab_value_col=value_col,
+        crosstab_agg=agg,
+        crosstab_df=pivot,
+    )
+
+    n_rows, n_cols = pivot.shape
+    lines = [
+        f"## 🔀 交叉分析：{row_col} × {col_col}",
+        f"",
+        f"- 聚合方式：**{agg_desc}**",
+        f"- 透视表规模：**{n_rows} 行 × {n_cols} 列**",
+        f"",
+        f"> 详细数据已写入 Excel 报告，支持下载查看。",
+    ]
+    if not pivot.empty:
+        preview = pivot.iloc[:5, :5]
+        lines.append(f"\n#### 预览（前 {min(5, n_rows)} 行 × {min(5, n_cols)} 列）")
+        try:
+            lines.append(preview.to_markdown())
+        except ImportError:
+            lines.append("```\n" + preview.to_string() + "\n```")
+
     result.summary_text = "\n".join(lines)
     return result

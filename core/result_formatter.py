@@ -73,6 +73,14 @@ def detect_focus(instruction: str, mode: str) -> str:
             return "best_only"
         return "default"
 
+    elif mode == "compare":
+        if any(k in inst for k in ["显著", "p值", "统计检验", "t检验", "anova"]):
+            return "test_detail"
+        return "default"
+
+    elif mode == "crosstab":
+        return "default"
+
     return "default"
 
 
@@ -132,6 +140,13 @@ def format_result(analysis: "AnalysisResult", instruction: str) -> str:
         "model_comparison": {
             "best_only": _fmt_mc_best_only,
             "default":   _fmt_model_comparison,
+        },
+        "compare": {
+            "test_detail": _fmt_compare_test_detail,
+            "default":     _fmt_compare,
+        },
+        "crosstab": {
+            "default": _fmt_crosstab,
         },
     }
 
@@ -901,3 +916,49 @@ def _fmt_mc_best_only(a: "AnalysisResult") -> str:
         f"- MAE：{row['MAE']:.4f}\n\n"
         f"> 共对比了 {len(df)} 个模型，详见 Excel 报告。"
     )
+
+
+# ──────────────────────────────────────────────────────────
+# 对比分析格式化
+# ──────────────────────────────────────────────────────────
+
+def _fmt_compare(a) -> str:
+    """对比分析默认输出：分组统计表 + 检验结论"""
+    return a.summary_text
+
+
+def _fmt_compare_test_detail(a) -> str:
+    """对比分析详细输出：重点展示统计检验细节"""
+    sig = "**显著差异**（p < 0.05）" if a.compare_p_value < 0.05 else "无显著差异（p ≥ 0.05）"
+    lines = [
+        f"## 📊 对比分析统计检验详情",
+        f"",
+        f"- 分析目标：**{a.compare_value_col}** 按 **{a.compare_group_col}** 分组",
+        f"- 检验方法：**{a.compare_test_name}**",
+        f"- 统计量：**{a.compare_stat:.4f}**",
+        f"- p 值：**{a.compare_p_value:.4f}**",
+        f"- 结论：{sig}",
+        f"",
+    ]
+    if a.compare_group_stats_df is not None:
+        lines += [
+            "### 各组描述统计",
+            "",
+            "| 组别 | 样本量 | 均值 | 标准差 | 中位数 | 最小值 | 最大值 |",
+            "|------|--------|------|--------|--------|--------|--------|",
+        ]
+        for _, r in a.compare_group_stats_df.iterrows():
+            lines.append(
+                f"| {r['组别']} | {r['样本量']} | {r['均值']} | "
+                f"{r['标准差']} | {r['中位数']} | {r['最小值']} | {r['最大值']} |"
+            )
+    return "\n".join(lines)
+
+
+# ──────────────────────────────────────────────────────────
+# 交叉分析格式化
+# ──────────────────────────────────────────────────────────
+
+def _fmt_crosstab(a) -> str:
+    """交叉分析输出：透视表预览 + 摘要"""
+    return a.summary_text

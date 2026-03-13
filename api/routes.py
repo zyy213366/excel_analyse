@@ -14,9 +14,14 @@ from pydantic import BaseModel
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from utils.data_loader import load_excel, get_numeric_columns, preprocess_for_analysis
 from utils.file_manager import get_output_path, cleanup_old_reports
-from core.analysis_engine import analyze_y_vs_all, analyze_two_column, analyze_multi_x_vs_y, analyze_model_comparison
+from core.analysis_engine import (
+    analyze_y_vs_all, analyze_two_column, analyze_multi_x_vs_y,
+    analyze_model_comparison, analyze_compare, analyze_crosstab,
+)
 from core.report_builder import build_report
 from core.result_formatter import format_result
+from core.excel_processor import ExcelProcessor
+from core.chart_builder import build_chart
 from config import OUTPUTS_DIR
 
 router = APIRouter()
@@ -269,6 +274,14 @@ async def api_analyze(req: AnalyzeRequest):
                 mode = "model_comparison"
                 x_cols = []
 
+            _compare_kw = ["对比分析", "比较各组", "组间对比", "分组比较", "各组差异", "t检验", "t-test"]
+            if mode == "y_vs_all" and any(k in inst_lower for k in _compare_kw):
+                mode = "compare"
+
+            _crosstab_kw = ["交叉分析", "透视表", "crosstab", "pivot", "交叉表", "行列分析"]
+            if any(k in inst_lower for k in _crosstab_kw):
+                mode = "crosstab"
+
             intent_info = {
                 "mode": mode,
                 "target_y": target_y,
@@ -367,6 +380,18 @@ async def api_analyze(req: AnalyzeRequest):
             if len(valid_x) < 1:
                 return JSONResponse({"success": False, "error": "模型对比至少需要 1 个自变量"})
             analysis = analyze_model_comparison(clean_df, target_y, valid_x)
+        elif mode == "compare":
+            group_c = x_cols[0] if x_cols else None
+            if not group_c:
+                return JSONResponse({"success": False, "error": "对比分析需要指定分组列（x_columns）"})
+            analysis = analyze_compare(clean_df, target_y, group_c)
+        elif mode == "crosstab":
+            if len(x_cols) < 1:
+                return JSONResponse({"success": False, "error": "交叉分析至少需要 1 个列（行分组列）"})
+            row_c = x_cols[0]
+            col_c = x_cols[1] if len(x_cols) >= 2 else target_y
+            val_c = target_y if target_y in clean_df.columns else ""
+            analysis = analyze_crosstab(clean_df, row_c, col_c, val_c)
         else:
             return JSONResponse({"success": False, "error": f"未知分析模式：{mode}"})
         analysis.raw_row_count = raw_count
@@ -477,3 +502,187 @@ async def api_save_settings(req: SettingsRequest):
     set_key(str(ENV_PATH), "DEEPSEEK_BASE_URL", req.base_url)
     set_key(str(ENV_PATH), "DEEPSEEK_MODEL", req.model)
     return {"success": True}
+
+
+# ──────────────────────────────────────────────────────────
+# API：Excel 处理 / 数据运算
+# ──────────────────────────────────────────────────────────
+
+class ProcessRequest(BaseModel):
+    file_id: str
+    operation: str          # clean/lookup/count/merge/split/calc_sum/calc_mean/calc_extremes/calc_logic/calc_aggregate
+    value_col: Optional[str] = None
+    group_col: Optional[str] = None
+    condition: str = ""
+    split_col: Optional[str] = None
+    agg_funcs: list[str] = []
+    value_cols: list[str] = []
+    # 清洗参数
+    drop_duplicates: bool = True
+    fill_missing: str = "mean"
+    normalize: bool = False
+    # 逻辑计算参数
+    true_label: str = "是"
+    false_label: str = "否"
+    new_col: str = "逻辑结果"
+
+
+def _write_process_excel(proc_result, out_path) -> None:
+    """将 ProcessResult 写入 Excel（支持多 Sheet 拆分）"""
+    import openpyxl
+    wb = openpyxl.Workbook()
+    if proc_result.result_sheets:
+        # 多 Sheet（拆分操作）
+        for i, (name, df) in enumerate(proc_result.result_sheets.items()):
+            ws = wb.create_sheet(title=str(name)[:31]) if i > 0 else wb.active
+            if i == 0:
+                ws.title = str(name)[:31]
+            for row in [df.columns.tolist()] + df.values.tolist():
+                ws.append([str(v) for v in row])
+    elif proc_result.result_df is not None:
+        ws = wb.active
+        ws.title = "结果"
+        df = proc_result.result_df
+        for row in [df.columns.tolist()] + df.values.tolist():
+            ws.append([str(v) for v in row])
+    wb.save(str(out_path))
+
+
+@router.post("/api/process")
+async def api_process(req: ProcessRequest):
+    """Excel 处理 / 数据运算接口"""
+    if req.file_id not in _uploaded_files:
+        raise HTTPException(400, "文件不存在，请重新上传")
+
+    file_path = _uploaded_files[req.file_id]
+    try:
+        df, _ = load_excel(str(file_path))
+    except Exception as e:
+        raise HTTPException(400, f"文件读取失败：{str(e)}")
+
+    proc = ExcelProcessor()
+    op = req.operation
+
+    try:
+        if op == "clean":
+            result = proc.process_clean(df,
+                drop_duplicates=req.drop_duplicates,
+                fill_missing=req.fill_missing or "mean",
+                normalize=req.normalize)
+        elif op == "lookup":
+            result = proc.process_lookup(df, req.condition)
+        elif op == "count":
+            result = proc.process_count(df, req.group_col, req.condition)
+        elif op == "split":
+            if not req.split_col:
+                return JSONResponse({"success": False, "error": "split 操作需要指定 split_col"})
+            result = proc.process_split(df, req.split_col)
+        elif op == "merge":
+            # 单文件合并模式：按 sheet 合并
+            sheets = pd.read_excel(str(file_path), sheet_name=None)
+            result = proc.process_merge(list(sheets.values()))
+        elif op == "calc_sum":
+            if not req.value_col:
+                return JSONResponse({"success": False, "error": "calc_sum 需要 value_col"})
+            result = proc.calc_sum(df, req.value_col, req.group_col, req.condition)
+        elif op == "calc_mean":
+            if not req.value_col:
+                return JSONResponse({"success": False, "error": "calc_mean 需要 value_col"})
+            result = proc.calc_mean(df, req.value_col, req.group_col, req.condition)
+        elif op == "calc_extremes":
+            if not req.value_col:
+                return JSONResponse({"success": False, "error": "calc_extremes 需要 value_col"})
+            result = proc.calc_extremes(df, req.value_col, req.group_col)
+        elif op == "calc_logic":
+            if not req.value_col or not req.condition:
+                return JSONResponse({"success": False,
+                                     "error": "calc_logic 需要 value_col 和 condition"})
+            result = proc.calc_logic(df, req.value_col, req.condition,
+                                     req.true_label, req.false_label, req.new_col)
+        elif op == "calc_aggregate":
+            cols = req.value_cols or [c for c in df.select_dtypes(include="number").columns]
+            result = proc.calc_aggregate(df, cols, req.group_col,
+                                         req.agg_funcs or None)
+        else:
+            return JSONResponse({"success": False, "error": f"未知操作：{op}"})
+    except Exception as e:
+        import traceback
+        return JSONResponse({"success": False,
+                             "error": f"处理失败：{str(e)}\n{traceback.format_exc()}"})
+
+    # 写入 Excel
+    report_filename = None
+    try:
+        from utils.file_manager import get_output_path
+        out_path = get_output_path(file_path.name, op)
+        _write_process_excel(result, out_path)
+        cleanup_old_reports()
+        report_filename = out_path.name
+    except Exception:
+        pass
+
+    # 转换 result_df 为前端可渲染的表格
+    table_rows = []
+    if result.result_df is not None and not result.result_df.empty:
+        table_rows = result.result_df.head(100).to_dict("records")
+
+    return {
+        "success": True,
+        "summary_text": result.summary_text,
+        "table_data": table_rows,
+        "report_filename": report_filename,
+        "data_info": {"raw": result.raw_row_count, "valid": result.valid_row_count},
+    }
+
+
+# ──────────────────────────────────────────────────────────
+# API：ECharts 图表生成
+# ──────────────────────────────────────────────────────────
+
+class ChartRequest(BaseModel):
+    file_id: str
+    chart_type: str        # bar/pie/line/area/combo/scatter
+    x_col: str
+    y_cols: list[str]
+    title: str = ""
+    condition: str = ""    # 可选过滤条件
+    extra: dict = {}
+
+
+@router.post("/api/chart")
+async def api_chart(req: ChartRequest):
+    """生成 ECharts option JSON，前端直接 setOption()"""
+    if req.file_id not in _uploaded_files:
+        raise HTTPException(400, "文件不存在，请重新上传")
+
+    file_path = _uploaded_files[req.file_id]
+    try:
+        df, _ = load_excel(str(file_path))
+    except Exception as e:
+        raise HTTPException(400, f"文件读取失败：{str(e)}")
+
+    # 可选过滤
+    if req.condition:
+        from core.excel_processor import _apply_condition
+        df = _apply_condition(df, req.condition)
+
+    # 列存在性检查
+    all_cols = [req.x_col] + req.y_cols
+    missing = [c for c in all_cols if c not in df.columns]
+    if missing:
+        return JSONResponse({"success": False,
+                             "error": f"列不存在：{missing}，可用列：{df.columns.tolist()[:10]}"})
+
+    try:
+        option = build_chart(
+            chart_type=req.chart_type,
+            df=df,
+            x_col=req.x_col,
+            y_cols=req.y_cols,
+            title=req.title,
+            extra=req.extra,
+        )
+    except Exception as e:
+        return JSONResponse({"success": False, "error": f"图表生成失败：{str(e)}"})
+
+    return {"success": True, "option": option}

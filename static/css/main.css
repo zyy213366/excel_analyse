@@ -766,3 +766,114 @@ button { cursor: pointer; border: none; background: none; font-family: inherit; 
   font-size: 11px;
   line-height: 1.5;
 }
+
+
+/* ──────────────────────────────────────────────────────────
+   四列能力面板 (home.html)
+   ────────────────────────────────────────────────────────── */
+
+.capability-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 16px;
+  margin-bottom: 28px;
+}
+
+@media (max-width: 1200px) {
+  .capability-grid { grid-template-columns: repeat(2, 1fr); }
+}
+@media (max-width: 640px) {
+  .capability-grid { grid-template-columns: 1fr; }
+}
+
+.capability-panel {
+  background: var(--white);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  transition: box-shadow 0.2s;
+}
+.capability-panel:hover {
+  box-shadow: 0 4px 18px rgba(0,0,0,0.09);
+}
+
+.capability-panel-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 16px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+}
+
+.capability-icon {
+  font-size: 24px;
+  flex-shrink: 0;
+}
+
+.capability-title {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text-primary);
+  line-height: 1.3;
+}
+
+.capability-desc {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
+.capability-items {
+  display: flex;
+  flex-direction: column;
+}
+
+.capability-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px;
+  text-decoration: none;
+  border-bottom: 1px solid var(--border);
+  transition: background 0.15s;
+  cursor: pointer;
+}
+.capability-item:last-child {
+  border-bottom: none;
+}
+.capability-item:hover {
+  background: rgba(42, 125, 95, 0.06);
+}
+
+.ci-icon {
+  font-size: 18px;
+  flex-shrink: 0;
+  width: 28px;
+  text-align: center;
+}
+
+.ci-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.ci-sub {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 1px;
+}
+
+/* ──────────────────────────────────────────────────────────
+   ECharts 图表容器（analyze.html 聊天气泡内）
+   ────────────────────────────────────────────────────────── */
+
+.chart-container {
+  width: 100%;
+  height: 360px;
+  margin-top: 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--white);
+}
