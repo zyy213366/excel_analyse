@@ -1095,6 +1095,7 @@ def analyze_model_comparison(
     - 最终指标在完整测试集上计算（无偏估计）
     """
     from sklearn.linear_model import LinearRegression, RidgeCV, LogisticRegression
+    from sklearn.tree import DecisionTreeRegressor, DecisionTreeClassifier
     from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
     from sklearn.ensemble import HistGradientBoostingRegressor, HistGradientBoostingClassifier
     from sklearn.neural_network import MLPRegressor, MLPClassifier
@@ -1177,6 +1178,9 @@ def analyze_model_comparison(
         model_specs = {
             "线性回归":    (LinearRegression(),                                   False, True),
             "岭回归":      (RidgeCV(alphas=[0.1, 1.0, 10.0]),                     False, True),
+            "决策树":      (DecisionTreeRegressor(
+                               max_depth=8, random_state=RF_RANDOM_STATE),
+                           False, False),
             "梯度提升":    (HistGradientBoostingRegressor(
                                max_iter=80, max_depth=5, random_state=RF_RANDOM_STATE),
                            False, False),
@@ -1198,6 +1202,9 @@ def analyze_model_comparison(
             "逻辑回归":    (LogisticRegression(max_iter=300,
                                random_state=RF_RANDOM_STATE, n_jobs=-1),
                            False, True),
+            "决策树":      (DecisionTreeClassifier(
+                               max_depth=8, random_state=RF_RANDOM_STATE),
+                           False, False),
             "梯度提升":    (HistGradientBoostingClassifier(
                                max_iter=80, max_depth=5, random_state=RF_RANDOM_STATE),
                            False, False),
@@ -1303,7 +1310,7 @@ def analyze_model_comparison(
         mc_cv_scores=cv_scores_store,
     )
 
-    medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣"]
+    medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣"]
     task_label  = "分类" if task == "classification" else "回归"
     score_label = "F1（加权）" if task == "classification" else "R²"
     lines = [
