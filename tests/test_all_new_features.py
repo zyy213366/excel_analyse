@@ -13,6 +13,10 @@ from core.excel_processor import ExcelProcessor, _apply_condition
 from core.analysis_engine import analyze_compare, analyze_crosstab
 from core.chart_builder import build_chart, build_bar, build_pie, build_line
 
+# 从 routes 模块导入路由辅助函数（Bug 1 验证）
+sys.path.insert(0, str(Path(__file__).parent.parent / "api"))
+from routes import _parse_process_instruction
+
 
 # ──────────────────────────────────────────────────────────
 # 测试数据工厂
@@ -71,6 +75,23 @@ class TestApplyCondition:
     def test_empty_condition_returns_all(self, sample_df):
         result = _apply_condition(sample_df, "")
         assert len(result) == len(sample_df)
+
+    def test_max_natural_language(self, sample_df):
+        """Bug 2 修复验证：'列名最大' 极值语义解析"""
+        result = _apply_condition(sample_df, "销售额最大")
+        assert len(result) == 1
+        assert result["销售额"].values[0] == 1500
+
+    def test_min_natural_language(self, sample_df):
+        result = _apply_condition(sample_df, "销售额最小的行")
+        assert len(result) == 1
+        assert result["销售额"].values[0] == 700
+
+    def test_max_case_insensitive(self, sample_df):
+        """列名大小写不敏感匹配"""
+        df = sample_df.rename(columns={"销售额": "Y"})
+        result = _apply_condition(df, "y最大")  # 小写 y 匹配大写 Y 列
+        assert result["Y"].values[0] == df["Y"].max()
 
 
 # ──────────────────────────────────────────────────────────
@@ -298,6 +319,54 @@ class TestChartBuilder:
     def test_color_palette(self, chart_df):
         opt = build_bar(chart_df, "类别", ["数量"])
         assert len(opt["color"]) >= 6
+
+
+# ──────────────────────────────────────────────────────────
+# Bug 修复验证：_parse_process_instruction 路由检测（Bug 1）
+# ──────────────────────────────────────────────────────────
+
+class TestParseProcessInstruction:
+    COLS = ["部门", "姓名", "销售额", "月份", "评级"]
+
+    def test_clean_detected(self):
+        """'清洗' 指令应被识别为 clean，不走 NLP"""
+        p = _parse_process_instruction("对数据进行清洗，去除重复行并填充缺失值", self.COLS)
+        assert p is not None
+        assert p["op"] == "clean"
+        assert p["drop_duplicates"] is True
+        assert p["fill_missing"] == "mean"
+
+    def test_clean_preprocess(self):
+        p = _parse_process_instruction("数据预处理", self.COLS)
+        assert p is not None and p["op"] == "clean"
+
+    def test_lookup_detected(self):
+        """'查找' 指令应被识别为 lookup"""
+        p = _parse_process_instruction("查找销售额最大的行", self.COLS)
+        assert p is not None
+        assert p["op"] == "lookup"
+        assert "销售额最大" in p["condition"]
+
+    def test_lookup_filter(self):
+        p = _parse_process_instruction("筛选销售额 > 1000的行", self.COLS)
+        assert p is not None and p["op"] == "lookup"
+
+    def test_count_detected(self):
+        p = _parse_process_instruction("统计数量", self.COLS)
+        assert p is not None and p["op"] == "count"
+
+    def test_calc_sum_detected(self):
+        p = _parse_process_instruction("对销售额求和", self.COLS)
+        assert p is not None and p["op"] == "calc_sum"
+
+    def test_analysis_not_matched(self):
+        """分析类指令不应被误匹配为处理操作"""
+        p = _parse_process_instruction("分析哪些因素影响了销售额", self.COLS)
+        assert p is None
+
+    def test_none_for_regression(self):
+        p = _parse_process_instruction("对销售额做多元回归分析", self.COLS)
+        assert p is None
 
 
 if __name__ == "__main__":

@@ -58,6 +58,18 @@ def _apply_condition(df: pd.DataFrame, condition: str) -> pd.DataFrame:
                     return df[ops_str[op](df[col].astype(str), val_str)]
             break
 
+    # 自然语言极值：列名最大 / 列名最小（支持大小写不敏感列名匹配）
+    m = re.match(r"^(.+?)(?:中)?(?:最大|最小)(?:的(?:行|记录|数据|值)?)?$", cond)
+    if m:
+        col_hint = m.group(1).strip()
+        is_max = "最大" in cond
+        col = col_hint if col_hint in df.columns else next(
+            (c for c in df.columns if c.lower() == col_hint.lower()), None
+        )
+        if col is not None:
+            extreme_val = df[col].max() if is_max else df[col].min()
+            return df[df[col] == extreme_val]
+
     return df  # 解析失败，返回原 df
 
 

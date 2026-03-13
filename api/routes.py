@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+import pandas as pd
 from fastapi import APIRouter, Request, UploadFile, File, HTTPException
 from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
@@ -146,6 +147,76 @@ class AnalyzeRequest(BaseModel):
     manual_x_cols: list[str] = []
 
 
+def _parse_process_instruction(inst: str, all_cols: list) -> Optional[dict]:
+    """
+    从自然语言指令中检测 Excel 处理/运算操作，返回含 'op' 字段的参数字典，或 None。
+    优先于 NLP 分析器执行，避免清洗/查找等操作被误判为统计分析。
+    """
+    # ── 数据清洗 ─────────────────────────────────────────────
+    _clean_kw = ["清洗", "去重", "去除重复", "填充缺失", "预处理", "数据预处理", "标准化"]
+    if any(k in inst for k in _clean_kw):
+        drop_dup = any(k in inst for k in ["去重", "去除重复", "重复行", "重复"])
+        fill_m: Optional[str] = None
+        if any(k in inst for k in ["填充缺失", "填充", "补全", "补缺"]):
+            if "中位数" in inst:
+                fill_m = "median"
+            elif "众数" in inst:
+                fill_m = "mode"
+            elif any(k in inst for k in ["用0", "填0", "零"]):
+                fill_m = "0"
+            else:
+                fill_m = "mean"
+        normalize = "标准化" in inst
+        # 若只说"清洗/预处理"，默认两者都做
+        if not drop_dup and fill_m is None and not normalize:
+            drop_dup, fill_m = True, "mean"
+        return {
+            "op": "clean",
+            "drop_duplicates": drop_dup,
+            "fill_missing": fill_m or "mean",
+            "normalize": normalize,
+        }
+
+    # ── 查找/筛选（必须在极值判断之前，避免"查找最大"误入calc_extremes）────
+    _lookup_kw = ["查找", "筛选", "过滤", "找出", "找到", "搜索"]
+    if any(k in inst for k in _lookup_kw):
+        condition = inst
+        for k in _lookup_kw:
+            condition = condition.replace(k, "")
+        for tail in ["的行", "的记录", "的数据", "行", "记录"]:
+            if condition.endswith(tail):
+                condition = condition[: -len(tail)]
+        condition = condition.strip("，,。. ")
+        return {"op": "lookup", "condition": condition}
+
+    # ── 计数/统计数量 ─────────────────────────────────────────
+    _count_kw = ["计数", "统计数量", "有多少行", "有多少条", "统计行数"]
+    if any(k in inst for k in _count_kw):
+        return {"op": "count", "group_col": None, "condition": ""}
+
+    # ── 求和 ──────────────────────────────────────────────────
+    if any(k in inst.lower() for k in ["求和", "总和", "合计", "求总"]):
+        vc = next((c for c in all_cols if c in inst), None)
+        return {"op": "calc_sum", "value_col": vc}
+
+    # ── 均值/平均 ─────────────────────────────────────────────
+    if any(k in inst.lower() for k in ["均值", "平均值", "平均数"]):
+        vc = next((c for c in all_cols if c in inst), None)
+        return {"op": "calc_mean", "value_col": vc}
+
+    # ── 最大最小/极差（在查找之后，避免"查找最大"走这里）────────
+    if any(k in inst for k in ["最大值", "最小值", "极差", "极值"]):
+        vc = next((c for c in all_cols if c in inst), None)
+        return {"op": "calc_extremes", "value_col": vc}
+
+    # ── 拆分（按列分Sheet）────────────────────────────────────
+    if any(k in inst for k in ["拆分", "分组导出", "按列拆分", "分sheet", "分Sheet"]):
+        sc = next((c for c in all_cols if c in inst), None)
+        return {"op": "split", "split_col": sc}
+
+    return None
+
+
 def _build_table_data(analysis) -> list[dict]:
     """从 AnalysisResult 提取界面展示用的关键统计列表"""
     rows = []
@@ -225,6 +296,90 @@ async def api_analyze(req: AnalyzeRequest):
     target_y = req.manual_y
     x_cols = [c for c in req.manual_x_cols if c != req.manual_y]
 
+    # ── 处理/运算类指令前置检测（优先于 NLP，直接调 ExcelProcessor）──────────
+    if req.use_ai and req.instruction.strip():
+        _proc_params = _parse_process_instruction(
+            req.instruction.strip(), list(df_raw.columns)
+        )
+        if _proc_params:
+            op = _proc_params.pop("op")
+            try:
+                if op == "clean":
+                    proc_result = ExcelProcessor.process_clean(df_raw, **_proc_params)
+                elif op == "lookup":
+                    proc_result = ExcelProcessor.process_lookup(
+                        df_raw, _proc_params.get("condition", "")
+                    )
+                elif op == "count":
+                    proc_result = ExcelProcessor.process_count(
+                        df_raw,
+                        _proc_params.get("group_col"),
+                        _proc_params.get("condition", ""),
+                    )
+                elif op == "calc_sum":
+                    vc = _proc_params.get("value_col")
+                    if not vc:
+                        return JSONResponse({
+                            "success": False,
+                            "error": f"请指定求和的列名，可用列：{list(df_raw.columns)[:10]}",
+                        })
+                    proc_result = ExcelProcessor.calc_sum(df_raw, vc)
+                elif op == "calc_mean":
+                    vc = _proc_params.get("value_col")
+                    if not vc:
+                        return JSONResponse({
+                            "success": False,
+                            "error": f"请指定均值的列名，可用列：{list(df_raw.columns)[:10]}",
+                        })
+                    proc_result = ExcelProcessor.calc_mean(df_raw, vc)
+                elif op == "calc_extremes":
+                    vc = _proc_params.get("value_col")
+                    if not vc:
+                        return JSONResponse({
+                            "success": False,
+                            "error": f"请指定列名，可用列：{list(df_raw.columns)[:10]}",
+                        })
+                    proc_result = ExcelProcessor.calc_extremes(df_raw, vc)
+                elif op == "split":
+                    sc = _proc_params.get("split_col")
+                    if not sc:
+                        return JSONResponse({
+                            "success": False,
+                            "error": f"请指定拆分列，可用列：{list(df_raw.columns)[:10]}",
+                        })
+                    proc_result = ExcelProcessor.process_split(df_raw, sc)
+                else:
+                    proc_result = None
+
+                if proc_result is not None:
+                    report_filename = None
+                    try:
+                        out_path = get_output_path(file_path.name, op)
+                        _write_process_excel(proc_result, out_path)
+                        cleanup_old_reports()
+                        report_filename = out_path.name
+                    except Exception:
+                        pass
+                    table_rows: list = []
+                    if proc_result.result_df is not None and not proc_result.result_df.empty:
+                        table_rows = proc_result.result_df.head(100).to_dict("records")
+                    return JSONResponse({
+                        "success": True,
+                        "summary_text": proc_result.summary_text,
+                        "table_data": table_rows,
+                        "report_filename": report_filename,
+                        "data_info": {
+                            "raw": proc_result.raw_row_count,
+                            "valid": proc_result.valid_row_count,
+                        },
+                    })
+            except Exception as e:
+                import traceback as _tb
+                return JSONResponse({
+                    "success": False,
+                    "error": f"处理失败：{str(e)}\n{_tb.format_exc()}",
+                })
+
     if req.use_ai and req.instruction.strip():
         try:
             from core.nlp_parser import IntentParser
@@ -292,10 +447,13 @@ async def api_analyze(req: AnalyzeRequest):
         except Exception as e:
             return JSONResponse({"success": False, "error": f"AI 解析失败：{str(e)}"})
 
+    # 不需要 target_y 的模式：直接放行
+    _no_y_modes = {"pca", "cluster", "compare", "crosstab"}
     if not target_y or target_y not in numeric_cols:
-        # target_y 未指定时，对 multi_x_vs_y 默认取第一个数值列
         if mode == "multi_x_vs_y" and numeric_cols:
             target_y = numeric_cols[0]
+        elif mode in _no_y_modes:
+            pass  # 这些模式不依赖 target_y，跳过校验
         else:
             return JSONResponse({"success": False, "error": f"目标变量 `{target_y}` 不存在，可用列：{numeric_cols[:5]}"})
 
@@ -311,8 +469,16 @@ async def api_analyze(req: AnalyzeRequest):
             if not x_cols:
                 return JSONResponse({"success": False, "error": "two_column 模式需要指定第二列"})
             cols_needed = [target_y, x_cols[0]]
+        elif mode in {"pca", "cluster"}:
+            # pca/cluster 不依赖 target_y，使用 x_cols 或全部数值列
+            cols_needed = x_cols if x_cols else numeric_cols
+        elif mode in {"compare", "crosstab"}:
+            # compare/crosstab 的 x_cols 可能含分类列，取 df_raw 中实际存在的列
+            raw_cols = list(df_raw.columns)
+            all_needed = ([target_y] if target_y else []) + x_cols
+            cols_needed = [c for c in all_needed if c in raw_cols] or numeric_cols
         else:
-            cols_needed = [target_y] + x_cols
+            cols_needed = ([target_y] if target_y else []) + x_cols
 
         clean_df, raw_count, valid_count = preprocess_for_analysis(df_raw, cols_needed)
         if valid_count < 10:
