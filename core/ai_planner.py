@@ -1,14 +1,13 @@
 """
-AI Planner — 调用 Claude 将自然语言指令转为 skill 调用序列。
+AI Planner — 调用 DeepSeek 将自然语言指令转为 skill 调用序列。
 """
 from __future__ import annotations
 import json
-import os
 import re
 from dataclasses import dataclass
-from typing import Any
-import anthropic
+from openai import OpenAI
 import pandas as pd
+from config import DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL
 from core.skills import SKILL_REGISTRY
 
 
@@ -50,16 +49,13 @@ def plan_to_steps(raw_text: str) -> list:
 class AIPLanner:
     """
     将自然语言指令翻译为 skill 调用序列。
-    使用 claude-haiku-4-5-20251001 以减少延迟和成本。
+    使用 DeepSeek-V3（通过 SiliconFlow）。
     """
 
-    MODEL = "claude-haiku-4-5-20251001"
-
-    def __init__(self, api_key: str = None):
-        key = api_key or os.getenv("ANTHROPIC_API_KEY") or os.getenv("CLAUDE_API_KEY")
-        if not key:
-            raise RuntimeError("未设置 ANTHROPIC_API_KEY 环境变量")
-        self.client = anthropic.Anthropic(api_key=key)
+    def __init__(self):
+        if not DEEPSEEK_API_KEY:
+            raise RuntimeError("DEEPSEEK_API_KEY 未配置，请检查 .env 文件")
+        self.client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
 
     def _build_schema_desc(self, df: pd.DataFrame) -> str:
         lines = [f"- {col}（{dtype}）" for col, dtype in df.dtypes.items()]
@@ -108,10 +104,10 @@ class AIPLanner:
         主入口：接收 df 和自然语言指令，返回 PlanStep 列表。
         """
         prompt = self._build_prompt(df, instruction)
-        msg = self.client.messages.create(
-            model=self.MODEL,
+        resp = self.client.chat.completions.create(
+            model=DEEPSEEK_MODEL,
             max_tokens=1024,
             messages=[{"role": "user", "content": prompt}],
         )
-        raw = msg.content[0].text
+        raw = resp.choices[0].message.content
         return plan_to_steps(raw)
