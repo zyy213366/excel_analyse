@@ -906,3 +906,92 @@ async def api_chart(req: ChartRequest):
         return JSONResponse({"success": False, "error": f"图表生成失败：{str(e)}"})
 
     return {"success": True, "option": option}
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 新架构：AI-as-Brain  /api/chat
+# ═══════════════════════════════════════════════════════════════════════════
+from core.ai_planner import AIPLanner
+from core.skill_executor import execute_plan
+from core.process_result import ProcessResult
+
+
+class ChatRequest(BaseModel):
+    file_id: str
+    instruction: str
+
+
+@router.post("/api/chat")
+async def api_chat(req: ChatRequest):
+    """
+    新架构入口：AI 大脑 + Skills 工具。
+    接收自然语言指令 → AI 规划 skill 序列 → 执行 → 返回结果。
+    """
+    if req.file_id not in _uploaded_files:
+        raise HTTPException(400, "文件不存在，请重新上传")
+
+    file_path = _uploaded_files[req.file_id]
+    try:
+        df_raw, _ = load_excel(str(file_path))
+    except Exception as e:
+        raise HTTPException(400, f"文件读取失败：{str(e)}")
+
+    # 1. AI 规划
+    try:
+        planner = AIPLanner()
+        plan = planner.plan(df_raw, req.instruction)
+    except Exception as e:
+        return JSONResponse({"success": False, "error": f"AI 规划失败：{str(e)}"})
+
+    # 2. 执行 plan
+    exec_result = execute_plan(df_raw, plan)
+
+    if not exec_result.success:
+        return JSONResponse({"success": False, "error": exec_result.error})
+
+    # 3. 保存结果文件
+    report_filename = None
+    try:
+        proc_result = ProcessResult(
+            operation="chat",
+            summary_text=exec_result.full_summary,
+            result_df=exec_result.df,
+        )
+        proc_result.raw_row_count = len(df_raw)
+        proc_result.valid_row_count = len(exec_result.df)
+        out_path = get_output_path(file_path.name, "chat")
+        _write_process_excel(proc_result, out_path)
+        cleanup_old_reports()
+        report_filename = out_path.name
+    except Exception:
+        pass
+
+    import math
+
+    def _sanitize(obj):
+        """递归将 NaN/Inf 替换为 None，确保 JSON 序列化安全。"""
+        if isinstance(obj, float) and (math.isnan(obj) or math.isinf(obj)):
+            return None
+        if isinstance(obj, dict):
+            return {k: _sanitize(v) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [_sanitize(v) for v in obj]
+        return obj
+
+    table_rows = []
+    if exec_result.df is not None and not exec_result.df.empty:
+        _safe_df = exec_result.df.head(200).where(pd.notnull(exec_result.df.head(200)), None)
+        table_rows = _sanitize(_safe_df.to_dict("records"))
+
+    return JSONResponse(_sanitize({
+        "success": True,
+        "summary_text": exec_result.full_summary,
+        "steps": exec_result.steps_summary,
+        "table_data": table_rows,
+        "chart_option": exec_result.chart_option,
+        "report_filename": report_filename,
+        "data_info": {
+            "raw": len(df_raw),
+            "valid": len(exec_result.df),
+        },
+    }))
