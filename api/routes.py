@@ -930,7 +930,7 @@ async def api_chat(req: ChatRequest):
     if req.file_id not in _uploaded_files:
         raise HTTPException(400, "文件不存在，请重新上传")
 
-    # 分析类指令前置检测：这些指令应走统计分析 (/api/analyze)，不走 skill pipeline
+    # 分析类指令前置检测：自动转发到分析引擎，无需用户手动切换模式
     _analysis_kw = [
         "分析", "回归", "相关", "影响", "因素", "预测", "模型",
         "聚类", "降维", "pca", "anova", "方差分析", "t检验",
@@ -938,19 +938,13 @@ async def api_chat(req: ChatRequest):
     ]
     inst_lower = req.instruction.lower()
     if any(kw in inst_lower for kw in _analysis_kw):
-        return JSONResponse({
-            "success": False,
-            "error": (
-                f"「{req.instruction}」是统计分析类指令，请切换到「分析」模式使用。\n\n"
-                "当前数据处理支持的指令类型：\n"
-                "• 删除列：删除年龄列 / 去掉备注列\n"
-                "• 筛选行：查找销售额最大的三行 / 筛选部门为销售的行\n"
-                "• 排序：按销售额降序排列\n"
-                "• 分组求和：按部门统计销售额总和\n"
-                "• 画图：画柱状图 / 按部门画饼图\n"
-                "• 清洗：去重 / 填充缺失值"
-            ),
-        })
+        # 构造 AnalyzeRequest 并复用 api_analyze 逻辑
+        analyze_req = AnalyzeRequest(
+            file_id=req.file_id,
+            instruction=req.instruction,
+            use_ai=True,
+        )
+        return await api_analyze(analyze_req)
 
     file_path = _uploaded_files[req.file_id]
     try:
