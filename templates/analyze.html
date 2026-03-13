@@ -237,7 +237,7 @@
                 <div
                   class="chart-container"
                   :id="`chart-${idx}`"
-                  x-init="$nextTick(() => renderChart(`chart-${idx}`, msg.chartOption))"
+                  x-init="renderChart(`chart-${idx}`, msg.chartOption)"
                 ></div>
               </template>
             </div>
@@ -323,7 +323,8 @@ function analyzeApp(prefillInstruction) {
     fileId: null,
     filename: '',
     rowCount: 0,
-    columns: [],
+    columns: [],        // 数值列（用于 y 轴）
+    allColumns: [],     // 全部列（用于 x 轴分类）
     messages: [],
     instruction: prefillInstruction || '',
     isLoading: false,
@@ -405,6 +406,7 @@ function analyzeApp(prefillInstruction) {
           this.filename = data.filename;
           this.rowCount = data.row_count;
           this.columns = data.numeric_columns;
+          this.allColumns = data.all_columns || data.numeric_columns;
           this.manualY = this.columns[0] || '';
           this.manualXCols = this.columns.slice(1);
           this.messages = [];
@@ -525,10 +527,13 @@ function analyzeApp(prefillInstruction) {
 
     // ── 快速图表生成 ──
     async runQuickChart(chartType) {
-      if (!this.fileId || this.columns.length < 2) return;
-      const xCol = this.columns[0];
-      const yCol = this.columns[1];
-      const title = `${yCol} — ${chartType}`;
+      if (!this.fileId || this.columns.length < 1) return;
+      // x 轴优先用第一个非数值列（分类轴），无则退化到第一个数值列
+      const allCols = this.allColumns.length ? this.allColumns : this.columns;
+      const numSet = new Set(this.columns);
+      const xCol = allCols.find(c => !numSet.has(c)) || allCols[0];
+      const yCol = this.columns[0];
+      const title = `${yCol} — ${this.chartTypeLabel(chartType)}`;
       await this.generateChart(chartType, xCol, [yCol], title);
     },
 
@@ -578,15 +583,23 @@ function analyzeApp(prefillInstruction) {
     },
 
     // ── ECharts 渲染 ──
+    // 注意：不能用 this.$nextTick，因为从 x-init 调用时 this 指向不是 Alpine 组件
+    // 改用 setTimeout 并支持重试（应对 CDN 尚未加载的情况）
     renderChart(domId, option) {
-      this.$nextTick(() => {
+      const doRender = (retries) => {
         const el = document.getElementById(domId);
-        if (!el || !window.echarts) return;
-        const chart = echarts.init(el);
+        if (!el || !window.echarts) {
+          if (retries > 0) setTimeout(() => doRender(retries - 1), 150);
+          return;
+        }
+        // 防止重复初始化
+        const existingChart = window.echarts.getInstanceByDom(el);
+        if (existingChart) existingChart.dispose();
+        const chart = window.echarts.init(el);
         chart.setOption(option);
-        // 响应式 resize
         window.addEventListener('resize', () => chart.resize());
-      });
+      };
+      setTimeout(() => doRender(5), 50);
     },
   };
 }
