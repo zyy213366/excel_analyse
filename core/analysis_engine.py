@@ -1088,15 +1088,17 @@ def analyze_model_comparison(
     top_n: int = 5,
 ) -> AnalysisResult:
     """
-    多模型赛马：对 top_n 个 X 列自动训练 5 个回归模型，5 折 CV 评估，
-    找出最优模型，并为每个模型保存预测值 vs 实际值数据（供报告绘图）。
+    多模型赛马：对 top_n 个 X 列自动训练多个回归/分类模型，5 折 CV 评估，
+    找出最优模型。全流程使用采样数据，保证大数据集响应速度。
     """
-    from sklearn.linear_model import LinearRegression, RidgeCV
-    from sklearn.ensemble import RandomForestRegressor, HistGradientBoostingRegressor
-    from sklearn.neural_network import MLPRegressor
-    from sklearn.model_selection import cross_val_score, KFold
+    from sklearn.linear_model import LinearRegression, RidgeCV, LogisticRegression
+    from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
+    from sklearn.ensemble import HistGradientBoostingRegressor, HistGradientBoostingClassifier
+    from sklearn.neural_network import MLPRegressor, MLPClassifier
+    from sklearn.model_selection import cross_val_score, KFold, StratifiedKFold
     from sklearn.preprocessing import StandardScaler, LabelEncoder
     from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
+    from sklearn.metrics import accuracy_score, f1_score
     import warnings
 
     # ── 列名防御过滤 ──
@@ -1106,133 +1108,197 @@ def analyze_model_comparison(
 
     # ── 变量类型检测 ──
     feature_types = _detect_feature_types(df, x_cols)
+    y_type = _detect_feature_types(df, [target_y]).get(target_y, "continuous")
 
-    # ── 预处理：分类列标签编码，连续列保留 ──
+    # ── 预处理：分类 X 列标签编码 ──
     X_raw = df[x_cols].copy()
     for col, ftype in feature_types.items():
         if ftype == "categorical":
             le = LabelEncoder()
             X_raw[col] = le.fit_transform(X_raw[col].astype(str))
-    X = X_raw.values.astype(float)
-    y = df[target_y].values.astype(float)
-    n = len(y)
+    X_all = X_raw.values.astype(float)
+    y_raw = df[target_y].values
 
-    # ── 数据量过大时采样，保证响应速度（CV 上限 3000 行）──
-    MAX_CV_ROWS = 3000
-    if n > MAX_CV_ROWS:
-        rng = np.random.RandomState(42)
-        idx = rng.choice(n, MAX_CV_ROWS, replace=False)
-        X_cv, y_cv = X[idx], y[idx]
-        sample_note = f"（数据量 {n} 行，CV 随机抽样 {MAX_CV_ROWS} 行）"
+    # ── Y 编码（分类任务）──
+    y_le = None
+    if y_type == "categorical":
+        y_le = LabelEncoder()
+        y_all = y_le.fit_transform(y_raw.astype(str)).astype(int)
+        task = "classification"
     else:
-        X_cv, y_cv = X, y
+        y_all = y_raw.astype(float)
+        task = "regression"
+
+    n = len(y_all)
+
+    # ── 全流程统一采样：CV + 训练 + 预测 都用同一份数据 ──
+    MAX_ROWS = 8000
+    if n > MAX_ROWS:
+        rng = np.random.RandomState(42)
+        idx = rng.choice(n, MAX_ROWS, replace=False)
+        X, y = X_all[idx], y_all[idx]
+        sample_note = f"（数据量 {n} 行，随机抽样 {MAX_ROWS} 行用于训练与评估）"
+    else:
+        X, y = X_all, y_all
         sample_note = ""
 
-    # ── 标准化（对线性/岭/神经网络有效，树模型无影响）──
+    n_sample = len(y)
+
+    # ── 标准化 ──
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
-    X_cv_scaled = scaler.transform(X_cv)
 
-    # ── 候选模型（平衡速度与精度）──
+    # ── 候选模型（根据任务类型选择）──
     n_feat = len(x_cols)
-    models = {
-        "线性回归":    LinearRegression(),
-        "岭回归":      RidgeCV(alphas=[0.1, 1.0, 10.0]),
-        "随机森林":    RandomForestRegressor(
-                           n_estimators=50, max_depth=8,
-                           random_state=RF_RANDOM_STATE, n_jobs=-1),
-        "梯度提升":    HistGradientBoostingRegressor(
-                           max_iter=100, max_depth=5,
-                           random_state=RF_RANDOM_STATE),
-        "神经网络MLP": MLPRegressor(
-                           hidden_layer_sizes=(min(64, n_feat * 8), min(32, n_feat * 4)),
-                           max_iter=200, random_state=RF_RANDOM_STATE,
-                           early_stopping=True, n_iter_no_change=15),
-    }
+    mlp_layers = (min(64, n_feat * 8), min(32, n_feat * 4))
 
-    n_cv = len(y_cv)
-    n_splits = max(2, min(5, n_cv // 10))
-    kf = KFold(n_splits=n_splits, shuffle=True, random_state=42)
+    if task == "regression":
+        models = {
+            "线性回归":    LinearRegression(),
+            "岭回归":      RidgeCV(alphas=[0.1, 1.0, 10.0]),
+            "随机森林":    RandomForestRegressor(
+                               n_estimators=50, max_depth=8,
+                               random_state=RF_RANDOM_STATE, n_jobs=-1),
+            "梯度提升":    HistGradientBoostingRegressor(
+                               max_iter=80, max_depth=5,
+                               random_state=RF_RANDOM_STATE),
+            "神经网络MLP": MLPRegressor(
+                               hidden_layer_sizes=mlp_layers,
+                               max_iter=150, random_state=RF_RANDOM_STATE,
+                               early_stopping=True, n_iter_no_change=10),
+        }
+        scoring = "r2"
+        cv_cls = KFold
+    else:
+        n_classes = len(np.unique(y))
+        avg = "binary" if n_classes == 2 else "macro"
+        models = {
+            "逻辑回归":    LogisticRegression(max_iter=300, random_state=RF_RANDOM_STATE, n_jobs=-1),
+            "随机森林":    RandomForestClassifier(
+                               n_estimators=50, max_depth=8,
+                               random_state=RF_RANDOM_STATE, n_jobs=-1),
+            "梯度提升":    HistGradientBoostingClassifier(
+                               max_iter=80, max_depth=5,
+                               random_state=RF_RANDOM_STATE),
+            "神经网络MLP": MLPClassifier(
+                               hidden_layer_sizes=mlp_layers,
+                               max_iter=150, random_state=RF_RANDOM_STATE,
+                               early_stopping=True, n_iter_no_change=10),
+        }
+        scoring = "f1_weighted"
+        cv_cls = StratifiedKFold
+
+    n_splits = max(2, min(5, n_sample // 50))
+    kf = cv_cls(n_splits=n_splits, shuffle=True, random_state=42)
 
     comparison_rows = []
     predictions_store = {}
     cv_scores_store = {}
 
     for model_name, model in models.items():
-        use_scaled = model_name in ("线性回归", "岭回归", "神经网络MLP")
-        X_use_cv = X_cv_scaled if use_scaled else X_cv
-        X_use_all = X_scaled if use_scaled else X
+        use_scaled = model_name in ("线性回归", "岭回归", "逻辑回归", "神经网络MLP")
+        X_use = X_scaled if use_scaled else X
 
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            cv_r2 = cross_val_score(model, X_use_cv, y_cv, cv=kf, scoring="r2")
-            model.fit(X_use_all, y)
+            cv_scores = cross_val_score(model, X_use, y, cv=kf, scoring=scoring, n_jobs=-1)
+            model.fit(X_use, y)
 
-        y_pred = model.predict(X_use_all)
-        r2 = float(r2_score(y, y_pred))
-        rmse = float(np.sqrt(mean_squared_error(y, y_pred)))
-        mae = float(mean_absolute_error(y, y_pred))
-        cv_mean = float(np.mean(cv_r2))
-        cv_std = float(np.std(cv_r2))
+        y_pred = model.predict(X_use)
+        cv_mean = float(np.mean(cv_scores))
+        cv_std  = float(np.std(cv_scores))
 
-        comparison_rows.append({
-            "模型":      model_name,
-            "训练集R²":  round(r2, 4),
-            "CV均值R²":  round(cv_mean, 4),
-            "CV标准差":  round(cv_std, 4),
-            "RMSE":      round(rmse, 4),
-            "MAE":       round(mae, 4),
-        })
+        if task == "regression":
+            r2   = float(r2_score(y, y_pred))
+            rmse = float(np.sqrt(mean_squared_error(y, y_pred)))
+            mae  = float(mean_absolute_error(y, y_pred))
+            comparison_rows.append({
+                "模型":      model_name,
+                "训练集R²":  round(r2, 4),
+                "CV均值R²":  round(cv_mean, 4),
+                "CV标准差":  round(cv_std, 4),
+                "RMSE":      round(rmse, 4),
+                "MAE":       round(mae, 4),
+            })
+        else:
+            acc = float(accuracy_score(y, y_pred))
+            f1  = float(f1_score(y, y_pred, average="weighted", zero_division=0))
+            comparison_rows.append({
+                "模型":        model_name,
+                "训练集准确率": round(acc, 4),
+                "CV均值F1":    round(cv_mean, 4),
+                "CV标准差":    round(cv_std, 4),
+            })
 
-        residuals = y - y_pred
         predictions_store[model_name] = {
             "actual":    y.tolist(),
             "predicted": y_pred.tolist(),
-            "residual":  residuals.tolist(),
+            "residual":  (y - y_pred).tolist(),
         }
-        cv_scores_store[model_name] = cv_r2.tolist()
+        cv_scores_store[model_name] = cv_scores.tolist()
 
-    comparison_df = pd.DataFrame(comparison_rows).sort_values("CV均值R²", ascending=False)
-    best_row = comparison_df.iloc[0]
+    sort_col = "CV均值R²" if task == "regression" else "CV均值F1"
+    comparison_df = pd.DataFrame(comparison_rows).sort_values(sort_col, ascending=False)
+    best_row  = comparison_df.iloc[0]
     best_name = str(best_row["模型"])
-    best_r2 = float(best_row["CV均值R²"])
+    best_score = float(best_row[sort_col])
 
     result = AnalysisResult(
         mode="model_comparison",
         target_y=target_y,
         x_columns=x_cols,
-        valid_row_count=n,
+        valid_row_count=n_sample,
         raw_row_count=n,
         mc_x_columns=x_cols,
         mc_comparison_df=comparison_df,
         mc_best_model_name=best_name,
-        mc_best_model_r2=best_r2,
+        mc_best_model_r2=best_score,
         mc_predictions=predictions_store,
         mc_feature_types=feature_types,
         mc_cv_scores=cv_scores_store,
     )
 
     medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣"]
+    task_label = "分类" if task == "classification" else "回归"
+    score_label = "F1（加权）" if task == "classification" else "R²"
     lines = [
         f"## 多模型对比分析（AutoML-lite）",
-        f"**目标变量**：`{target_y}`  **输入特征**：{', '.join(f'`{c}`' for c in x_cols)}",
+        f"**目标变量**：`{target_y}`（{'分类变量' if task == 'classification' else '连续变量'}）  "
+        f"**输入特征**：{', '.join(f'`{c}`' for c in x_cols)}",
         f"**有效样本**：{n} 行  **评估方式**：{n_splits} 折交叉验证{sample_note}",
+        f"**任务类型**：{task_label}",
         f"",
         f"### 最优模型：{best_name}",
-        f"- 交叉验证 R² = **{best_r2:.4f}**（越高越好）",
+        f"- 交叉验证 {score_label} = **{best_score:.4f}**（越高越好）",
         f"",
         f"### 模型对比排名",
-        f"| 排名 | 模型 | CV R² | CV σ | RMSE | MAE |",
-        f"|------|------|-------|------|------|-----|",
     ]
-    for i, (_, row) in enumerate(comparison_df.iterrows()):
-        medal = medals[i] if i < len(medals) else str(i + 1)
-        lines.append(
-            f"| {medal} | **{row['模型']}** | {row['CV均值R²']:.4f} | "
-            f"±{row['CV标准差']:.4f} | {row['RMSE']:.4f} | {row['MAE']:.4f} |"
-        )
-    lines.append(f"")
-    lines.append(f"> Excel 报告中每个模型均有独立 Sheet，包含预测值 vs 实际值散点图与残差图。")
+
+    if task == "regression":
+        lines += [
+            "| 排名 | 模型 | CV R² | CV σ | RMSE | MAE |",
+            "|------|------|-------|------|------|-----|",
+        ]
+        for i, (_, row) in enumerate(comparison_df.iterrows()):
+            medal = medals[i] if i < len(medals) else str(i + 1)
+            lines.append(
+                f"| {medal} | **{row['模型']}** | {row['CV均值R²']:.4f} | "
+                f"±{row['CV标准差']:.4f} | {row['RMSE']:.4f} | {row['MAE']:.4f} |"
+            )
+    else:
+        lines += [
+            "| 排名 | 模型 | CV F1 | CV σ | 训练准确率 |",
+            "|------|------|-------|------|-----------|",
+        ]
+        for i, (_, row) in enumerate(comparison_df.iterrows()):
+            medal = medals[i] if i < len(medals) else str(i + 1)
+            lines.append(
+                f"| {medal} | **{row['模型']}** | {row['CV均值F1']:.4f} | "
+                f"±{row['CV标准差']:.4f} | {row['训练集准确率']:.4f} |"
+            )
+
+    lines.append("")
+    lines.append("> Excel 报告中每个模型均有独立 Sheet，包含预测值 vs 实际值散点图与残差图。")
     result.summary_text = "\n".join(lines)
     return result
 
