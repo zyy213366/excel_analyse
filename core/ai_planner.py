@@ -78,6 +78,20 @@ class AIPLanner:
 ## 可用操作（Skills）
 {self._build_skill_list()}
 
+## 条件格式规范（filter_rows / delete_rows 的 condition 参数必须遵守）
+条件字符串只能使用以下格式，**禁止使用 Python/pandas 表达式**：
+- 符号运算符：`列名 > 值`、`列名 >= 值`、`列名 == 值`、`列名 != 值`
+- 中文运算符：`列名大于值`、`列名小于值`、`列名等于值`、`列名大于等于值`、`列名小于等于值`
+- 包含匹配：`列名 包含 关键词`
+- 单极值：`列名最大`、`列名最小`（返回最大/最小的那一行）
+- Top-N：`列名最大的3行`、`列名最小的两行`（返回前N行）
+
+示例：
+- "查找Y最大的行" → condition: "Y最大"
+- "筛选销售额前三名" → condition: "销售额最大的3行"
+- "销售额大于1000" → condition: "销售额大于1000" 或 "销售额 > 1000"
+- 禁止写成 "Y == Y.max()" 或 "df[Y].max()" 这类 Python 表达式
+
 ## 用户指令
 {instruction}
 
@@ -106,7 +120,7 @@ class AIPLanner:
         prompt = self._build_prompt(df, instruction)
         resp = self.client.chat.completions.create(
             model=DEEPSEEK_MODEL,
-            max_tokens=1024,
+            max_tokens=4096,
             messages=[{"role": "user", "content": prompt}],
         )
         raw = resp.choices[0].message.content
